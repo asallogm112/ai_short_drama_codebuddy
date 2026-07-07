@@ -27,6 +27,43 @@ import {
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 
+// 压缩图片 data URL：限制最长边为 maxSize px，保存到 localStorage 防超限
+const compressDataUrl = (dataUrl: string, maxSize = 800, quality = 0.7): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width, h = img.height;
+      if (w > maxSize || h > maxSize) {
+        const ratio = Math.min(maxSize / w, maxSize / h);
+        w = Math.round(w * ratio);
+        h = Math.round(h * ratio);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { resolve(dataUrl); return; }
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+};
+
+// 将 prompt 中的绝对时间戳（如 00:10-00:12）转为相对时间（如 0-2秒），基于 shot.duration 计算偏移
+const convertToRelativeTime = (text: string, durationStartSec: number): string => {
+  if (!text || durationStartSec === 0) return text;
+  return text.replace(/(\d{2}):(\d{2})\s*-\s*(\d{2}):(\d{2})/g, (match, h1, m1, h2, m2) => {
+    const startSec = parseInt(h1) * 60 + parseInt(m1);
+    const endSec = parseInt(h2) * 60 + parseInt(m2);
+    const relStart = startSec - durationStartSec;
+    const relEnd = endSec - durationStartSec;
+    if (relStart < 0 || relEnd < 0) return match; // 不在当前镜头范围内，保留
+    return `${relStart}-${relEnd}秒`;
+  });
+};
+
 const formatPromptWithPrefix = (name: string, prompt: string, type: 'characters' | 'scenes' | 'props') => {
   if (!name || !prompt) return prompt;
   const cleanName = name.trim();
@@ -242,7 +279,8 @@ const formatPromptTags = (text: string, elementNames: string[] = [], elementsLis
     for (const r of replacements) {
       const nextSegments: string[] = [];
       for (const seg of segments) {
-        if (seg.startsWith('@')) {
+        // 跳过已包含 @ 的片段，避免已存在的 @R2_阿秀 被"阿秀"再次拆分
+        if (seg.includes('@')) {
           nextSegments.push(seg);
         } else {
           const subParts = seg.split(r.term);
@@ -1543,27 +1581,21 @@ export function Detail() {
   };
   const [fullscreenVideo, setFullscreenVideo] = useState<string | null>(null);
 
-  const handleShotKeyframeUpload = (shotIndex: number, keyframeIndex: number, file: File) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = e.target?.result as string;
-      if (dataUrl && script) {
-        const newShots = [...script.shots];
-        const currentKeyframes = [...(newShots[shotIndex].keyframes || ['', '', '', ''])];
-        currentKeyframes[keyframeIndex] = dataUrl;
-        newShots[shotIndex] = {
-          ...newShots[shotIndex],
-          keyframes: currentKeyframes
-        };
-        const newScript = {
-          ...script,
-          shots: newShots
-        };
-        updateScript(script.id, newScript);
-        showToast(`已成功上传该镜头的关键帧 ${keyframeIndex + 1}`);
-      }
-    };
-    reader.readAsDataURL(file);
+  const handleShotKeyframeUpload = async (shotIndex: number, keyframeIndex: number, file: File) => {
+    const dataUrl = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target?.result as string);
+      reader.readAsDataURL(file);
+    });
+    if (!dataUrl || !script) return;
+    const compressed = await compressDataUrl(dataUrl);
+    const newShots = [...script.shots];
+    const currentKeyframes = [...(newShots[shotIndex].keyframes || ['', '', '', ''])];
+    currentKeyframes[keyframeIndex] = compressed;
+    newShots[shotIndex] = { ...newShots[shotIndex], keyframes: currentKeyframes };
+    const newScript = { ...script, shots: newShots };
+    updateScript(script.id, newScript);
+    showToast(`已成功上传关键帧 ${keyframeIndex + 1}`);
   };
 
   const showToast = (message: string) => {
@@ -1864,27 +1896,21 @@ export function Detail() {
     }
   };
 
-  const handleImageUpload = (type: 'characters' | 'scenes' | 'props', index: number, file: File) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = e.target?.result as string;
-      if (dataUrl && script) {
-        const newElements = [...script.elements[type]];
-        newElements[index] = {
-          ...newElements[index],
-          imageUrl: dataUrl
-        };
-        const newScript = {
-          ...script,
-          elements: {
-            ...script.elements,
-            [type]: newElements
-          }
-        };
-        updateScript(script.id, newScript);
-      }
+  const handleImageUpload = async (type: 'characters' | 'scenes' | 'props', index: number, file: File) => {
+    const dataUrl = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target?.result as string);
+      reader.readAsDataURL(file);
+    });
+    if (!dataUrl || !script) return;
+    const compressed = await compressDataUrl(dataUrl);
+    const newElements = [...script.elements[type]];
+    newElements[index] = { ...newElements[index], imageUrl: compressed };
+    const newScript = {
+      ...script,
+      elements: { ...script.elements, [type]: newElements }
     };
-    reader.readAsDataURL(file);
+    updateScript(script.id, newScript);
   };
 
   const getMaterialDetails = (materialStr: string) => {
@@ -2311,39 +2337,74 @@ export function Detail() {
                   <Users className="w-6 h-6" />
                   <h3 className="text-xl font-bold text-neutral-900">角色设定</h3>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => { setImportText(''); setImportError(null); setIsImportElementsOpen(true); }}
-                  className="flex items-center space-x-1 text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-600 font-semibold px-3 py-1.5 rounded-lg transition-colors"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>导入素材列表</span>
-                </button>
+                <div className="flex items-center space-x-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const lines: string[] = [];
+                      script?.elements.characters.forEach(c => lines.push(c.prompt));
+                      script?.elements.scenes.forEach(s => lines.push(s.prompt));
+                      script?.elements.props.forEach(p => lines.push(p.prompt));
+                      copyToClipboard(lines.join('\n\n'), '所有素材提示词');
+                    }}
+                    className="flex items-center space-x-1 text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-600 font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                    title="一键复制所有素材提示词"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>批量复制提示词</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setImportText(''); setImportError(null); setIsImportElementsOpen(true); }}
+                    className="flex items-center space-x-1 text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-600 font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>导入素材列表</span>
+                  </button>
+                </div>
               </div>
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 {script.elements.characters.map((char, i) => (
                   <div key={i} className="bg-white border border-neutral-200 rounded-xl overflow-hidden shadow-sm flex flex-col h-full hover:shadow-md transition-shadow">
-                    <div className="relative aspect-square w-full bg-neutral-100 group/image">
+                    <div className="relative w-full h-48 bg-neutral-100 group/image">
                       {char.imageUrl ? (
-                        <img src={char.imageUrl} alt={char.name} className="w-full h-full object-cover" />
+                        <>
+                          <img
+                            src={char.imageUrl}
+                            alt={char.name}
+                            className="w-full h-full object-contain cursor-pointer"
+                            onClick={() => setFullscreenVideo(char.imageUrl || '')}
+                          />
+                          <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover/image:opacity-100 transition-opacity pointer-events-none">
+                            <label className="text-white text-sm font-medium bg-black/60 px-3 py-1.5 rounded-lg cursor-pointer pointer-events-auto hover:bg-black/80 transition-colors">
+                              更改图片
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (file) handleImageUpload('characters', i, file);
+                                }}
+                              />
+                            </label>
+                          </div>
+                        </>
                       ) : (
-                        <div className="w-full h-full flex flex-col items-center justify-center text-neutral-400">
+                        <label className="w-full h-full flex flex-col items-center justify-center text-neutral-400 cursor-pointer">
                           <ImageIcon className="w-8 h-8 mb-2" />
                           <span className="text-xs">上传参考图</span>
-                        </div>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) handleImageUpload('characters', i, file);
+                            }}
+                          />
+                        </label>
                       )}
-                      <label className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover/image:opacity-100 transition-opacity cursor-pointer">
-                        <span className="text-white text-sm font-medium">{char.imageUrl ? '更改图片' : '上传图片'}</span>
-                        <input 
-                          type="file" 
-                          accept="image/*" 
-                          className="hidden" 
-                          onChange={(e) => {
-                            const file = e.target.files?.[0];
-                            if (file) handleImageUpload('characters', i, file);
-                          }} 
-                        />
-                      </label>
                     </div>
                     <div className="p-5 border-b border-neutral-100 flex-1 flex flex-col justify-center">
                       <h4 className="text-lg font-bold text-neutral-900 mb-0">{char.name}</h4>
@@ -2375,27 +2436,45 @@ export function Detail() {
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 {script.elements.scenes.map((scene, i) => (
                   <div key={i} className="bg-white border border-neutral-200 rounded-xl overflow-hidden shadow-sm flex flex-col h-full hover:shadow-md transition-shadow">
-                    <div className="relative aspect-square w-full bg-neutral-100 group/image">
+                    <div className="relative w-full h-48 bg-neutral-100 group/image">
                       {scene.imageUrl ? (
-                        <img src={scene.imageUrl} alt={scene.name} className="w-full h-full object-cover" />
+                        <>
+                          <img
+                            src={scene.imageUrl}
+                            alt={scene.name}
+                            className="w-full h-full object-contain cursor-pointer"
+                            onClick={() => setFullscreenVideo(scene.imageUrl || '')}
+                          />
+                          <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover/image:opacity-100 transition-opacity pointer-events-none">
+                            <label className="text-white text-sm font-medium bg-black/60 px-3 py-1.5 rounded-lg cursor-pointer pointer-events-auto hover:bg-black/80 transition-colors">
+                              更改图片
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (file) handleImageUpload('scenes', i, file);
+                                }}
+                              />
+                            </label>
+                          </div>
+                        </>
                       ) : (
-                        <div className="w-full h-full flex flex-col items-center justify-center text-neutral-400">
+                        <label className="w-full h-full flex flex-col items-center justify-center text-neutral-400 cursor-pointer">
                           <ImageIcon className="w-8 h-8 mb-2" />
                           <span className="text-xs">上传参考图</span>
-                        </div>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) handleImageUpload('scenes', i, file);
+                            }}
+                          />
+                        </label>
                       )}
-                      <label className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover/image:opacity-100 transition-opacity cursor-pointer">
-                        <span className="text-white text-sm font-medium">{scene.imageUrl ? '更改图片' : '上传图片'}</span>
-                        <input 
-                          type="file" 
-                          accept="image/*" 
-                          className="hidden" 
-                          onChange={(e) => {
-                            const file = e.target.files?.[0];
-                            if (file) handleImageUpload('scenes', i, file);
-                          }} 
-                        />
-                      </label>
                     </div>
                     <div className="p-5 border-b border-neutral-100 flex-1 flex flex-col justify-center">
                       <h4 className="text-lg font-bold text-neutral-900 mb-0">{scene.name}</h4>
@@ -2428,40 +2507,58 @@ export function Detail() {
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 {script.elements.props.map((prop, i) => (
                   <div key={i} className="bg-white border border-neutral-200 rounded-xl overflow-hidden shadow-sm flex flex-col h-full hover:shadow-md transition-shadow">
-                      <div className="relative aspect-square w-full bg-neutral-100 group/image">
-                        {prop.imageUrl ? (
-                          <img src={prop.imageUrl} alt={prop.name} className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full flex flex-col items-center justify-center text-neutral-400">
-                            <ImageIcon className="w-8 h-8 mb-2" />
-                            <span className="text-xs">上传参考图</span>
+                    <div className="relative w-full h-48 bg-neutral-100 group/image">
+                      {prop.imageUrl ? (
+                        <>
+                          <img
+                            src={prop.imageUrl}
+                            alt={prop.name}
+                            className="w-full h-full object-contain cursor-pointer"
+                            onClick={() => setFullscreenVideo(prop.imageUrl || '')}
+                          />
+                          <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover/image:opacity-100 transition-opacity pointer-events-none">
+                            <label className="text-white text-sm font-medium bg-black/60 px-3 py-1.5 rounded-lg cursor-pointer pointer-events-auto hover:bg-black/80 transition-colors">
+                              更改图片
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (file) handleImageUpload('props', i, file);
+                                }}
+                              />
+                            </label>
                           </div>
-                        )}
-                        <label className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover/image:opacity-100 transition-opacity cursor-pointer">
-                          <span className="text-white text-sm font-medium">{prop.imageUrl ? '更改图片' : '上传图片'}</span>
-                          <input 
-                            type="file" 
-                            accept="image/*" 
-                            className="hidden" 
+                        </>
+                      ) : (
+                        <label className="w-full h-full flex flex-col items-center justify-center text-neutral-400 cursor-pointer">
+                          <ImageIcon className="w-8 h-8 mb-2" />
+                          <span className="text-xs">上传参考图</span>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
                             onChange={(e) => {
                               const file = e.target.files?.[0];
                               if (file) handleImageUpload('props', i, file);
-                            }} 
+                            }}
                           />
                         </label>
-                      </div>
-                      <div className="p-5 border-b border-neutral-100 flex-1 flex flex-col justify-center">
-                        <h4 className="text-lg font-bold text-neutral-900 mb-0">{prop.name}</h4>
-                      </div>
-                      
-                      <CollapsiblePrompt 
-                        title="生成提示词 (Prompt)"
-                        prompt={formatPromptWithPrefix(prop.name, prop.prompt, 'props')}
-                        hoverClass="hover:bg-amber-50 hover:border-amber-200 hover:text-amber-600"
-                        onCopy={() => copyToClipboard(formatPromptWithPrefix(prop.name, prop.prompt, 'props'), '道具提示词')}
-                        onSave={(newVal) => {
-                          handleSaveElementPrompt('props', i, newVal);
-                        }}
+                      )}
+                    </div>
+                    <div className="p-5 border-b border-neutral-100 flex-1 flex flex-col justify-center">
+                      <h4 className="text-lg font-bold text-neutral-900 mb-0">{prop.name}</h4>
+                    </div>
+                    
+                    <CollapsiblePrompt 
+                      title="生成提示词 (Prompt)"
+                      prompt={formatPromptWithPrefix(prop.name, prop.prompt, 'props')}
+                      hoverClass="hover:bg-amber-50 hover:border-amber-200 hover:text-amber-600"
+                      onCopy={() => copyToClipboard(formatPromptWithPrefix(prop.name, prop.prompt, 'props'), '道具提示词')}
+                      onSave={(newVal) => {
+                        handleSaveElementPrompt('props', i, newVal);
+                      }}
                         onRegenerate={async () => {
                           await handleRegenerateElementPrompt('props', i, prop.name, prop.description, prop.prompt);
                         }}
@@ -2635,7 +2732,8 @@ export function Detail() {
                                             <img
                                               src={shot.lastFrameUrl}
                                               alt="上一镜末帧"
-                                              className="w-full object-contain max-h-[140px] rounded-lg border border-neutral-200 bg-neutral-50 shadow-sm"
+                                              className="w-full aspect-[16/9] object-contain rounded-lg border border-neutral-200 bg-neutral-50 shadow-sm cursor-pointer hover:opacity-80 transition-opacity"
+                                              onClick={() => setFullscreenVideo(shot.lastFrameUrl)}
                                             />
                                           </div>
                                         )}
@@ -2668,7 +2766,8 @@ export function Detail() {
                                                     <button
                                                       type="button"
                                                       onClick={() => {
-                                                        const cleaned = shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '');
+                                                        const startSec = shot.duration ? ((p) => { const parts = p.replace(/[[\]]/g, '').split('-'); return parseInt(parts[0]?.trim()?.split(':')[0] || '0') * 60 + parseInt(parts[0]?.trim()?.split(':')[1] || '0'); })(shot.duration) : 0;
+                                                        const cleaned = convertToRelativeTime(shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '').replace(/^\*\*镜\s*\d+\s*\([^)]+\)\s*【[^】]+】\s*\*\*[\r\n]*/gm, ''), startSec);
                                                         const formattedVideoPrompt = formatPromptTags(
                                                           appendDialogueAndSfx(cleanDuplicateDurations(shot.duration, cleaned), shot),
                                                           elementNames,
@@ -2725,22 +2824,45 @@ export function Detail() {
                                                 return (
                                                   <div 
                                                     key={kfIdx} 
-                                                    className="relative aspect-video bg-neutral-50 border border-dashed border-neutral-300 rounded-lg overflow-hidden group/kf hover:border-indigo-500 transition-all cursor-pointer shadow-sm"
+                                                    className="relative aspect-[16/9] bg-neutral-50 border border-dashed border-neutral-300 rounded-lg overflow-hidden group/kf hover:border-indigo-500 transition-all shadow-sm"
                                                   >
                                                     {kfUrl ? (
                                                       <>
-                                                        <img src={kfUrl} alt={`Keyframe ${kfIdx + 1}`} className="w-full h-full object-cover" />
-                                                        <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover/kf:opacity-100 transition-opacity">
-                                                          <span className="text-white text-[9px] font-semibold bg-black/60 px-1.5 py-0.5 rounded-full">
+                                                        <img
+                                                          src={kfUrl}
+                                                          alt={`Keyframe ${kfIdx + 1}`}
+                                                          className="w-full h-full object-contain cursor-pointer"
+                                                          onClick={() => setFullscreenVideo(kfUrl)}
+                                                        />
+                                                        <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover/kf:opacity-100 transition-opacity pointer-events-none">
+                                                          <label className="text-white text-[9px] font-semibold bg-black/60 px-1.5 py-0.5 rounded-full cursor-pointer pointer-events-auto hover:bg-black/80">
                                                             更换帧 {kfIdx + 1}
-                                                          </span>
+                                                            <input 
+                                                              type="file" 
+                                                              accept="image/*" 
+                                                              className="hidden" 
+                                                              onChange={(e) => {
+                                                                const file = e.target.files?.[0];
+                                                                if (file) handleShotKeyframeUpload(originalIndex, kfIdx, file);
+                                                              }}
+                                                            />
+                                                          </label>
                                                         </div>
                                                       </>
                                                     ) : (
-                                                      <div className="absolute inset-0 flex flex-col items-center justify-center text-neutral-400 p-1">
+                                                      <label className="absolute inset-0 flex flex-col items-center justify-center text-neutral-400 p-1 cursor-pointer">
                                                         <Plus className="w-3.5 h-3.5 mb-0.5 text-neutral-300" />
                                                         <span className="text-[9px] font-semibold text-neutral-400">帧 {kfIdx + 1}</span>
-                                                      </div>
+                                                        <input 
+                                                          type="file" 
+                                                          accept="image/*" 
+                                                          className="hidden" 
+                                                          onChange={(e) => {
+                                                            const file = e.target.files?.[0];
+                                                            if (file) handleShotKeyframeUpload(originalIndex, kfIdx, file);
+                                                          }}
+                                                        />
+                                                      </label>
                                                     )}
 
                                                     {/* Generating indicator */}
@@ -2772,15 +2894,6 @@ export function Detail() {
                                                       </div>
                                                     )}
 
-                                                    <input 
-                                                      type="file" 
-                                                      accept="image/*" 
-                                                      className="absolute inset-0 opacity-0 cursor-pointer text-[0px]" 
-                                                      onChange={(e) => {
-                                                        const file = e.target.files?.[0];
-                                                        if (file) handleShotKeyframeUpload(originalIndex, kfIdx, file);
-                                                      }}
-                                                    />
                                                   </div>
                                                 );
                                               });
@@ -2837,7 +2950,11 @@ export function Detail() {
                                           <div className="flex items-center space-x-1">
                                             <button 
                                               type="button"
-                                              onClick={() => copyToClipboard(formatPromptTags(appendDialogueAndSfx(mergeDurationAndPrompt(shot.duration, shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '')), shot), elementNames, elements), '视频提示词')}
+                                              onClick={() => {
+                                                const startSec = shot.duration ? ((p) => { const parts = p.replace(/[[\]]/g, '').split('-'); return parseInt(parts[0]?.trim()?.split(':')[0] || '0') * 60 + parseInt(parts[0]?.trim()?.split(':')[1] || '0'); })(shot.duration) : 0;
+                                                const cleaned = convertToRelativeTime(shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '').replace(/^\*\*镜\s*\d+\s*\([^)]+\)\s*【[^】]+】\s*\*\*[\r\n]*/gm, ''), startSec);
+                                                copyToClipboard(formatPromptTags(appendDialogueAndSfx(mergeDurationAndPrompt(shot.duration, cleaned), shot), elementNames, elements), '视频提示词');
+                                              }}
                                               className="text-neutral-400 hover:text-indigo-600 hover:bg-neutral-200 p-1 rounded transition-colors"
                                               title="复制提示词"
                                             >
@@ -2910,7 +3027,10 @@ export function Detail() {
                                               <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:thin] pr-1">
                                                 <p className="text-xs font-mono text-neutral-600 leading-relaxed break-words whitespace-pre-wrap pb-4">
                                                   {shot.duration && <span className="font-bold text-indigo-600 mr-1">[{shot.duration}]</span>}
-                                                  {renderEnhancedPrompt(appendDialogueAndSfx(cleanDuplicateDurations(shot.duration, shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '')), shot), elementNames, elements, script, updateScript, copyToClipboard)}
+                                                  {renderEnhancedPrompt(appendDialogueAndSfx(cleanDuplicateDurations(shot.duration, (() => {
+                                                    const startSec = shot.duration ? (() => { const p = shot.duration.replace(/[[\]]/g, '').split('-'); return parseInt(p[0]?.trim()?.split(':')[0] || '0') * 60 + parseInt(p[0]?.trim()?.split(':')[1] || '0'); })() : 0;
+                                                    return convertToRelativeTime(shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '').replace(/^\*\*镜\s*\d+\s*\([^)]+\)\s*【[^】]+】\s*\*\*[\r\n]*/gm, ''), startSec);
+                                                  })()), shot), elementNames, elements, script, updateScript, copyToClipboard)}
                                                 </p>
                                               </div>
                                               
@@ -3506,7 +3626,7 @@ export function Detail() {
         </div>
       )}
 
-      {/* 全屏视频弹窗 */}
+      {/* 全屏视频/图片弹窗 */}
       {fullscreenVideo && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => setFullscreenVideo(null)}>
           <div className="relative w-full max-w-5xl" onClick={e => e.stopPropagation()}>
@@ -3517,7 +3637,11 @@ export function Detail() {
             >
               <X className="w-6 h-6" />
             </button>
-            <video src={fullscreenVideo} controls autoPlay className="w-full max-h-[85vh] rounded-xl bg-black shadow-2xl" />
+            {fullscreenVideo.startsWith('data:video') || fullscreenVideo.startsWith('blob:') ? (
+              <video src={fullscreenVideo} controls autoPlay className="w-full max-h-[85vh] rounded-xl bg-black shadow-2xl" />
+            ) : (
+              <img src={fullscreenVideo} alt="预览" className="w-full max-h-[85vh] object-contain rounded-xl bg-black shadow-2xl" />
+            )}
           </div>
         </div>
       )}

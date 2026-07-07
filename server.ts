@@ -347,11 +347,13 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
         mappings.forEach(({ synonym, fullName }) => {
           if (!synonym) return;
           const escapedSynonym = synonym.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-          const regex = new RegExp(`(?<!@)${escapedSynonym}`, 'g');
+          // 负向零宽断言：前面不是 @ 且不是 R\d+_ 模式（避免 @R2_阿秀 被"阿秀"再次匹配）
+          const regex = new RegExp(`(?<![@][RSP]\\d+_)${escapedSynonym}`, 'g');
           result = result.replace(regex, `@${fullName}`);
         });
 
         result = result.replace(/@+([RSP]\d+_[^@\s，。：:,、]+)/g, '@$1');
+        result = result.replace(/@([RSP]\d+_)@/g, '@');
         return result;
       };
 
@@ -576,11 +578,13 @@ ${existingStory}
         mappings.forEach(({ synonym, fullName }) => {
           if (!synonym) return;
           const escapedSynonym = synonym.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-          const regex = new RegExp(`(?<!@)${escapedSynonym}`, 'g');
+          // 负向零宽断言：前面不是 @ 且不是 R\d+_ 模式（避免 @R2_阿秀 被"阿秀"再次匹配）
+          const regex = new RegExp(`(?<![@][RSP]\\d+_)${escapedSynonym}`, 'g');
           result = result.replace(regex, `@${fullName}`);
         });
 
         result = result.replace(/@+([RSP]\d+_[^@\s，。：:,、]+)/g, '@$1');
+        result = result.replace(/@([RSP]\d+_)@/g, '@');
         return result;
       };
 
