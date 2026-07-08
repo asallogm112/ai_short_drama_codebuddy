@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { createServer as createViteServer } from "vite";
 import "dotenv/config";
 import multer from "multer";
@@ -9,8 +10,10 @@ import JSON5 from "json5";
 const upload = multer({ dest: 'uploads/' });
 
 // 加强版 JSON 解析：自动剥离 markdown 代码块 + JSON5 容错
+// 加强版 JSON 解析：自动剥离 markdown 代码块 + JSON5 容错。解析失败返回 null，由调用方决定如何处理。
 function safeParseJson(text: string): any {
   let cleaned = text.trim();
+  if (!cleaned) return null;
 
   // 移除所有 ```json ``` ```javascript ```js 等 markdown 代码块标记
   cleaned = cleaned.replace(/^```[a-zA-Z]*\s*/gm, '').replace(/\s*```\s*$/gm, '');
@@ -20,9 +23,7 @@ function safeParseJson(text: string): any {
   // 如果包含多余的文字，尝试提取第一个 { ... } 或 [ ... ]
   const firstBrace = cleaned.indexOf('{');
   const firstBracket = cleaned.indexOf('[');
-  if (firstBrace === -1 && firstBracket === -1) {
-    throw new Error("Response contains no JSON object or array");
-  }
+  if (firstBrace === -1 && firstBracket === -1) return null;
   const jsonStart = (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) ? firstBrace : firstBracket;
   let depth = 0;
   let inString = false;
@@ -40,11 +41,13 @@ function safeParseJson(text: string): any {
       else if (ch === endChar) { depth--; if (depth === 0) { end = i; break; } }
     }
   }
-  if (end === -1) {
-    throw new Error("Unmatched JSON brackets, cannot extract valid JSON");
+  if (end === -1) return null;
+  try {
+    const jsonStr = cleaned.substring(jsonStart, end + 1);
+    return JSON5.parse(jsonStr);
+  } catch {
+    return null;
   }
-  const jsonStr = cleaned.substring(jsonStart, end + 1);
-  return JSON5.parse(jsonStr);
 }
 
 async function startServer() {
@@ -143,16 +146,16 @@ async function startServer() {
 ## 一、秒级分镜强制硬性规则
 1. 10秒为1个大分镜，编号格式：镜N (起始总时长-结束总时长s) 【段落功能】，每个独立切片在所属大分镜内部时间统一从0秒重新计数
 2. 大分镜内严格执行「全景定场→中景叙事→特写落点」景别递进，禁止颠倒景别顺序
-3. 单切片固定语法：「切片内起始秒  景别  专业运镜术语 , 画面内容 , 台词: 对话内容 , 音效: 声音内容」
+3. 单切片固定语法：「切片内起始秒  景别  专业运镜术语 , 画面内容 , 台词: 对话内容」
 4. 复用素材引用：@Rxx/@Sxx/@Pxx 素材引用前后各空2格
-5. 音画字段拆分：人物对话归「台词」字段，环境音/动作音/背景音乐归「音效」字段；无台词强制标注「台词：无」
+5. 台词格式： @R1_XX  说："台词内容"。无台词强制标注「台词：无」
 6. 台词固定格式： @R1_XX  说："台词内容"
 7. 镜头转场：必须标注「镜头切到/镜头切至」，光影氛围直接融入画面描述撰写
 8. 禁止口语化运镜：删掉慢慢推、动一动镜头、凑近拍这类通俗话术，必须使用标准专业运镜术语
-9. 禁止混用景别，禁止打乱全景→中景→特写递进逻辑
-10. 复用素材必须挂载 @索引，零散临时物件、环境细节，禁止新增 P/S/R 编号
-11. 禁止台词、音效字段混写，空白字段禁止留白，统一填写「无」
-12. 光影、环境质感全部并入画面描述，禁止单独拆分字段
+8. 禁止混用景别，禁止打乱全景→中景→特写递进逻辑
+9. 复用素材必须挂载 @索引，零散临时物件、环境细节，禁止新增 P/S/R 编号
+10. 空白字段禁止留白，统一填写「无」
+11. 光影、环境质感全部并入画面描述，禁止单独拆分字段
 
 ## 二、影视级专业运镜词库（直接套用，禁止自创口语化运镜）
 ### 基础机位运镜
@@ -168,20 +171,21 @@ async function startServer() {
 
 ## 三、分镜标准输出模板
 **镜1 (0-10s) 【功能标注】**
-0-2秒  全景  固定镜头， @S1_XX  空间与人物位置交代，台词：无，音效：环境音
-3-6秒  中景  匀速向前推镜，镜头切到  @R1_XX  核心动作推进，台词：无，音效：动作音效
-7-10秒 特写  瞳孔微距推镜，镜头切到  @R1_XX  情绪细节落点，台词:  @R1_XX  说："对话内容" , 音效：收尾音效
+0-2秒  全景  固定镜头， @S1_XX  空间与人物位置交代，台词：无
+3-6秒  中景  匀速向前推镜，镜头切到  @R1_XX  核心动作推进，台词：无
+7-10秒 特写  瞳孔微距推镜，镜头切到  @R1_XX  情绪细节落点，台词:  @R1_XX  说："对话内容"
 
 ### 补充说明
 每个大分镜内部切片计时独立重置，比如镜2(10-20s)里的镜头切片依旧从0秒算起，示例：
 **镜2 (10-20s) 【功能标注】**
-0-3秒  中景  横移跟拍，画面内容，台词：无，音效：环境声
+0-3秒  中景  横移跟拍，画面内容，台词：无
 3-6秒  中景 镜头上推 从 @R1_XX 脚部 慢慢推到头部  然后  全身景
-6-10秒 近景  低角度仰拍，画面内容，台词: @R1_XX 说："台词"，音效：动作音
+6-10秒 近景  低角度仰拍，画面内容，台词: @R1_XX 说："台词"
 
 【prompt 字段填写说明】：
 将上述分镜模板中每个大分镜的完整文本（包括 **镜N** 标题行和所有切片行）填入对应 shot 的 prompt 字段中。每个 shot 的 duration 固定为 10 秒，从 00:00 开始按序递增：00:00-00:10、00:10-00:20、00:20-00:30 ...
-camera 字段填写该镜头的总运镜概括，action 字段填核心动作，dialogue 字段填台词，sfx 字段填音效。
+camera 字段填写该镜头的总运镜概括，action 字段填核心动作，dialogue 字段填台词。
+【绝对禁止】：你输出的 prompt 中绝对禁止出现任何 "音效"/"背景音乐"/"听觉"/"声音"/"音频" 相关描述或字段。只能写纯视觉画面描述。
 // Guidelines finished
 `;
 
@@ -232,6 +236,7 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
       }
 
       const parsedData = safeParseJson(generatedJson);
+      if (!parsedData) throw new Error("AI 返回了无法解析的 JSON，请重试");
 
       interface ParsedElement {
         fullName: string;
@@ -519,6 +524,7 @@ ${existingStory}
 
       const parsedData = safeParseJson(generatedJson);
 
+      if (!parsedData) throw new Error("AI 返回了无法解析的 JSON，请重试");
       interface ParsedElement {
         fullName: string;
         code: string;
@@ -682,24 +688,48 @@ ${existingStory}
 `;
 
       let resultText = "";
-      if (!process.env.DEEPSEEK_API_KEY) {
-        throw new Error("DEEPSEEK_API_KEY is not configured on the server. Please add it in your settings.");
+
+      if (provider === "deepseek") {
+        if (!process.env.DEEPSEEK_API_KEY) {
+          throw new Error("DEEPSEEK_API_KEY is not configured on the server. Please add it in your settings.");
+        }
+        const response = await fetch("https://api.deepseek.com/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: "deepseek-chat",
+            messages: [{ role: "user", content: promptText }],
+            temperature: 0.7
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
+        resultText = data.choices[0].message.content;
+      } else if (provider === "doubao") {
+        if (!process.env.DOUBAO_API_KEY || !process.env.DOUBAO_MODEL_ENDPOINT) {
+          throw new Error("DOUBAO_API_KEY or DOUBAO_MODEL_ENDPOINT is not configured on the server.");
+        }
+        const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.DOUBAO_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: process.env.DOUBAO_MODEL_ENDPOINT,
+            messages: [{ role: "user", content: promptText }],
+            temperature: 0.7
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || "Doubao API error");
+        resultText = data.choices[0].message.content;
+      } else {
+        throw new Error("Invalid provider selected");
       }
-      const response = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: "deepseek-chat",
-          messages: [{ role: "user", content: promptText }],
-          temperature: 0.7
-        })
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
-      resultText = data.choices[0].message.content;
       
       resultText = resultText.replace(/^\s*```[a-zA-Z]*/m, "").replace(/```\s*$/m, "").trim();
       res.json({ prompt: resultText });
@@ -739,24 +769,48 @@ ${videoPrompt || "无"}
 `;
 
       let resultText = "";
-      if (!process.env.DEEPSEEK_API_KEY) {
-        throw new Error("DEEPSEEK_API_KEY is not configured on the server. Please add it in your settings.");
+
+      if (provider === "deepseek") {
+        if (!process.env.DEEPSEEK_API_KEY) {
+          throw new Error("DEEPSEEK_API_KEY is not configured on the server. Please add it in your settings.");
+        }
+        const response = await fetch("https://api.deepseek.com/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: "deepseek-chat",
+            messages: [{ role: "user", content: promptText }],
+            temperature: 0.7
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
+        resultText = data.choices[0].message.content;
+      } else if (provider === "doubao") {
+        if (!process.env.DOUBAO_API_KEY || !process.env.DOUBAO_MODEL_ENDPOINT) {
+          throw new Error("DOUBAO_API_KEY or DOUBAO_MODEL_ENDPOINT is not configured on the server.");
+        }
+        const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.DOUBAO_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: process.env.DOUBAO_MODEL_ENDPOINT,
+            messages: [{ role: "user", content: promptText }],
+            temperature: 0.7
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || "Doubao API error");
+        resultText = data.choices[0].message.content;
+      } else {
+        throw new Error("Invalid provider selected");
       }
-      const response = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: "deepseek-chat",
-          messages: [{ role: "user", content: promptText }],
-          temperature: 0.7
-        })
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
-      resultText = data.choices[0].message.content;
 
       try {
         const parsed = safeParseJson(resultText);
@@ -801,14 +855,13 @@ ${videoPrompt || "无"}
 4. 返回的内容必须直接是生成结果，不要有任何多余的话或 markdown 块引用包围。
 `;
       } else if (type === 'shot') {
-        systemInstruction = "你是一位顶级的电影导演和视频提示词专家。你的任务是为分镜头重新生成一个极致丰富、电影级、可直接交给 视频大模型的高水准【单镜头一镜到底】纯中文视频生成提示词。";
+        systemInstruction = "你是一位顶级的电影导演和视频提示词专家。你的任务是为分镜头重新生成一个极致丰富、电影级、可直接交给 视频大模型的高水准【单镜头一镜到底】纯中文视频生成提示词。\n【绝对禁止规则】：你的输出中绝对禁止出现任何 「音效」「背景音乐」「听觉」「声音」「音频」字段或描述。只能写纯视觉画面描述（人物动作、表情、运镜、光影、景别等）。违反此规则会导致输出作废。";
         userPrompt = `
 镜头时间范围 & 机位与动作设定：
 - 镜头时间: ${shotContext?.duration || "00:00 - 00:05"}
 - 镜头的运镜: ${shotContext?.camera || "无"}
 - 镜头的动作 and 微表情: ${shotContext?.action || "无"}
 - 镜头的台词: ${shotContext?.dialogue || "无"}
-- 镜头的音效/背景音乐: ${shotContext?.sfx || "无"}
 - 镜头的出场素材标签: ${shotContext?.materials || "无"}
 - 当前旧的提示词: ${currentPrompt || "无"}
 
@@ -832,33 +885,93 @@ ${videoPrompt || "无"}
       }
 
       let resultText = "";
-      if (!process.env.DEEPSEEK_API_KEY) {
-        throw new Error("DEEPSEEK_API_KEY is not configured on the server. Please add it in your settings.");
+
+      if (provider === "deepseek") {
+        if (!process.env.DEEPSEEK_API_KEY) {
+          throw new Error("DEEPSEEK_API_KEY is not configured on the server. Please add it in your settings.");
+        }
+        const response = await fetch("https://api.deepseek.com/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: "deepseek-chat",
+            messages: [
+              { role: "system", content: systemInstruction },
+              { role: "user", content: userPrompt }
+            ],
+            temperature: 0.4
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
+        resultText = data.choices[0].message.content;
+      } else if (provider === "doubao") {
+        if (!process.env.DOUBAO_API_KEY || !process.env.DOUBAO_MODEL_ENDPOINT) {
+          throw new Error("DOUBAO_API_KEY or DOUBAO_MODEL_ENDPOINT is not configured on the server.");
+        }
+        const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.DOUBAO_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: process.env.DOUBAO_MODEL_ENDPOINT,
+            messages: [
+              { role: "system", content: systemInstruction },
+              { role: "user", content: userPrompt }
+            ],
+            temperature: 0.4
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || "Doubao API error");
+        resultText = data.choices[0].message.content;
+      } else {
+        throw new Error("Invalid provider selected");
       }
-      const response = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: "deepseek-chat",
-          messages: [
-            { role: "system", content: systemInstruction },
-            { role: "user", content: userPrompt }
-          ],
-          temperature: 0.8
-        })
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
-      resultText = data.choices[0].message.content;
       
       resultText = resultText.replace(/^\s*```[a-zA-Z]*/m, "").replace(/```\s*$/m, "").trim();
+      // 后置清洗：删除 LLM 残留的任何音效/背景音乐/听觉描述（含 csv 引号包围的长文本）
+      resultText = resultText
+        .replace(/[，,]\s*音效\s*:\s*"[^"]*"/g, '')
+        .replace(/[，,]\s*音效\s*:\s*[^，,\d]+/g, '')
+        .replace(/\[?音效[/\s]*(背景音乐)?[\s:/，,：]+\s*[^\]]+\]?/g, '')
+        .replace(/\[sound[^\]]*\]/gi, '')
+        .replace(/[，,]\s*听觉[^，,\d]+/g, '')
+        .replace(/\s{2,}/g, ' ')
+        .replace(/[，,]\s*[，,]/g, '，').trim();
       res.json({ prompt: resultText });
     } catch (error: any) {
       console.error("Regenerate Prompt API Error:", error);
       res.status(500).json({ error: error.message || "Failed to regenerate prompt" });
+    }
+  });
+
+  // 分镜配套图片导出到桌面
+  app.post("/api/export-shot-assets", (req, res) => {
+    try {
+      const { folderName, files } = req.body;
+      if (!folderName || !Array.isArray(files)) {
+        return res.status(400).json({ error: "folderName and files array required" });
+      }
+      const safeName = folderName.replace(/[<>:"/\\|?*]/g, '_');
+      const dir = path.join(os.homedir(), 'Desktop', safeName);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      for (const f of files) {
+        if (!f.name || !f.dataUrl) continue;
+        const base64 = f.dataUrl.split(',')[1] || f.dataUrl;
+        const buf = Buffer.from(base64, 'base64');
+        const safeFileName = f.name.replace(/[<>:"/\\|?*]/g, '_');
+        fs.writeFileSync(path.join(dir, safeFileName), buf);
+      }
+      res.json({ ok: true, path: dir });
+    } catch (e: any) {
+      console.error("Export error:", e);
+      res.status(500).json({ error: e.message });
     }
   });
 

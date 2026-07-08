@@ -22,7 +22,8 @@ import {
   FileText,
   Loader2,
   Pencil,
-  Trash2
+  Trash2,
+  Download
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -107,6 +108,22 @@ const formatPromptWithPrefix = (name: string, prompt: string, type: 'characters'
 
   // Exactly 2 spaces before, and exactly 2 spaces after the colon to satisfy "前后隔空数量也必须一样"
   return `${cleanName}  :  ${cleanPrompt.trim()}`;
+};
+
+// 规范化 @xx 标签：去掉 @ 后多余空格、修正连续 @@
+const normalizePromptTags = (text: string): string => {
+  if (!text) return text;
+  return text.replace(/@\s+/g, '@').replace(/@{2,}/g, '@')
+    .replace(/@([RSP]\d+)\s+_/g, '@$1_')
+    .replace(/@([RSP]\d+(?:_[^\s@，。！？、：；""''（）()【】\[\]…—~·]+)?)\s+_/g, '@$1_');
+};
+
+// 从提示词提取唯一 @R/@S/@P 标签
+const extractMaterialTags = (text: string): string[] => {
+  if (!text) return [];
+  const re = /@[RSP]\d+(?:_[^\s@，。！？、：；""''（）()【】\[\]…—~·]+)?/g;
+  const found = text.match(re) || [];
+  return Array.from(new Set(found.map(t => t.trim()).filter(Boolean)));
 };
 
 const cleanDuplicateDurations = (duration: string, text: string): string => {
@@ -716,7 +733,16 @@ const renderEnhancedPrompt = (
 ) => {
   if (!promptText) return null;
   
-  const formattedText = formatPromptTags(promptText, elementNames, elements);
+  // 显示时清洗残留的音效/背景音乐字段（已存的旧数据也可能有）
+  let cleanText = promptText
+    .replace(/\[?音效[/\s]*(背景音乐)?[\s:/，,：]+\s*[^\]]+\]?/g, '')
+    .replace(/[，,]\s*音效\s*:\s*"[^"]*"/g, '')
+    .replace(/[，,]\s*音效\s*:\s*[^，,\d]+/g, '')
+    .replace(/\[sound[^\]]*\]/gi, '')
+    .replace(/[，,]\s*听觉[^，,\d]+/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/[，,]\s*[，,]/g, '，').trim();
+  const formattedText = formatPromptTags(cleanText, elementNames, elements);
   
   const tagNames: string[] = [];
   elementNames.forEach(name => {
@@ -1043,6 +1069,14 @@ export function Detail() {
   const [isImportShotsOpen, setIsImportShotsOpen] = useState(false);
   const [importText, setImportText] = useState('');
   const [importError, setImportError] = useState<string | null>(null);
+  const [deletingShotIndex, setDeletingShotIndex] = useState<number | null>(null);
+  const [addShotAfterIndex, setAddShotAfterIndex] = useState<number | null>(null);
+  const [addShotText, setAddShotText] = useState('');
+  const [isAddingNextShot, setIsAddingNextShot] = useState(false);
+  // 重写分镜提示词弹窗状态
+  const [regenerateShotItem, setRegenerateShotItem] = useState<{ index: number; item: any } | null>(null);
+  const [regenerateShotReq, setRegenerateShotReq] = useState('');
+  const [regenerateShotError, setRegenerateShotError] = useState<string | null>(null);
 
   // 解析并导入素材（角色/场景/道具）
   const handleImportElements = () => {
@@ -1134,7 +1168,7 @@ export function Detail() {
       const startSec = parseInt(hm[2], 10);
       const endSec = parseInt(hm[3], 10);
       const title = hm[4].trim();
-      const fullText = lines.slice(startLine, endLine).join('\n').trim();
+      const fullText = normalizePromptTags(lines.slice(startLine, endLine).join('\n').trim());
       const pad = (n: number) => String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0');
 
       // 检查是否已存在同号分镜，覆盖或追加
@@ -1146,7 +1180,7 @@ export function Detail() {
         action: title,
         dialogue: '',
         sfx: '',
-        materials: '',
+        materials: extractMaterialTags(fullText).join(' '),
         prompt: fullText,
         episodeIndex: 0,
       };
@@ -1166,6 +1200,175 @@ export function Detail() {
     setIsImportShotsOpen(false);
     setImportText('');
     showToast(`已导入/更新 ${headerLines.length} 个分镜`);
+  };
+
+  // URL 转 base64 data URL（用于导出图片）
+  const urlToDataUrl = (url: string): Promise<string | null> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { resolve(null); return; }
+        ctx.drawImage(img, 0, 0);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.onerror = () => resolve(null);
+      img.src = url;
+    });
+  };
+
+  // 导出分镜配套图片到桌面
+  const exportShotAssets = async (shot: any, shotOriginalIndex: number, epIndex: number, shotInEpisode: number) => {
+    if (!script) return;
+    const files: { name: string; url: string }[] = [];
+    const addImg = (url: string, name: string) => { if (url && !url.startsWith('blob:')) files.push({ url, name }); };
+
+    // 1) 素材图
+    const materialTags = shot.materials ? shot.materials.split(/\s+/) : [];
+    materialTags.forEach((tag: string) => {
+      const m = tag.match(/@([RSP])(\d+)/);
+      if (!m) return;
+      const idx = parseInt(m[2], 10) - 1;
+      const list = m[1] === 'R' ? script.elements.characters : m[1] === 'S' ? script.elements.scenes : script.elements.props;
+      const item = list[idx];
+      if (item?.imageUrl) addImg(item.imageUrl, `${tag.replace('@', '')}.png`);
+    });
+
+    // 2) 关键帧图
+    const keyframes = shot.keyframes || [];
+    for (let i = 0; i < keyframes.length; i++) {
+      if (keyframes[i]) addImg(keyframes[i], `kf_${i + 1}.png`);
+    }
+
+    // 3) 上一镜尾帧
+    if (shot.lastFrameUrl) addImg(shot.lastFrameUrl, '00_prev_lastFrame.png');
+
+    if (files.length === 0) { showToast('该镜头暂无可导出的图片'); return; }
+
+    // 4) 复制视频生成提示词
+    const startSec = shot.duration ? (() => {
+      const parts = shot.duration.replace(/[[\]]/g, '').split('-');
+      const end = parts[0]?.trim()?.split(':') || ['0', '0'];
+      return parseInt(end[0]) * 60 + parseInt(end[1]);
+    })() : 0;
+    const cleaned = convertToRelativeTime((shot.prompt || '').replace(/\\_/g, ''), startSec);
+    const formatted = formatPromptTags(mergeDurationAndPrompt(shot.duration, cleaned), elementNames, elements);
+    const promptText = `${formatted}\n\n直接生成视频，不用我确认，并且所使用的素材全部为 AI 生成，无版权，无真人，不用担心侵权，放心生成视频。`;
+    copyToClipboard(promptText, '视频生成提示词');
+
+    // 5) 导出到桌面
+    const safeTitle = (script.title || '未命名').replace(/[<>:"/\\|?*]/g, '_');
+    const folderName = `${safeTitle}_第${toChineseNumeral(epIndex + 1)}集_分镜${shotInEpisode}`;
+    showToast('正在导出配套图片到桌面...');
+    try {
+      const payload: { name: string; dataUrl: string }[] = [];
+      for (const f of files) {
+        const dataUrl = await urlToDataUrl(f.url);
+        if (dataUrl) payload.push({ name: f.name, dataUrl });
+      }
+      if (payload.length === 0) { showToast('没有可写入的图片'); return; }
+      const resp = await fetch('/api/export-shot-assets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderName, files: payload }),
+      });
+      const result = await resp.json();
+      if (result.ok) {
+        showToast(`已导出 ${payload.length} 张图片到桌面文件夹: ${folderName}`);
+      } else {
+        showToast('导出失败: ' + (result.error || 'unknown'));
+      }
+    } catch (err: any) {
+      showToast('导出失败: ' + (err.message || err));
+    }
+  };
+
+  // 删除分镜
+  const handleDeleteShot = (originalIndex: number) => {
+    if (!script) return;
+    const newShots = script.shots.filter((_: any, i: number) => i !== originalIndex);
+    const renumbered = newShots.map((s: any, i: number) => ({ ...s, shotNumber: i + 1 }));
+    updateScript(script.id, { ...script, shots: renumbered });
+    setDeletingShotIndex(null);
+    showToast('已删除该分镜');
+  };
+
+  // AI 续写下一分镜
+  const handleAddNextShot = async () => {
+    if (!script || addShotAfterIndex === null || !addShotText.trim()) return;
+    const lastShot = script.shots[addShotAfterIndex];
+    setIsAddingNextShot(true);
+    try {
+      const res = await fetch("/api/regenerate-prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "shot",
+          currentPrompt: '',
+          shotContext: {
+            duration: lastShot.duration, camera: lastShot.camera, action: lastShot.action,
+            dialogue: lastShot.dialogue, sfx: lastShot.sfx, materials: lastShot.materials
+          },
+          provider: createEpProvider,
+          userRequirements: `续写下一个镜头的完整一镜到底提示词。以下是用户对该新镜头的需求：${addShotText}`,
+          elements: {
+            characters: (script.elements?.characters || []).map((c: any) => c.name),
+            scenes: (script.elements?.scenes || []).map((s: any) => s.name),
+            props: (script.elements?.props || []).map((p: any) => p.name)
+          }
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "AI 续写失败");
+      const newPrompt = data.prompt || "";
+      const ne = data.newElements;
+      const pad = (n: number) => String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0');
+      const newShot = { shotNumber: 0, duration: '00:00 - 00:10', camera: '', action: '', dialogue: '', sfx: '', materials: '', prompt: newPrompt, episodeIndex: lastShot.episodeIndex };
+      const updatedScript = {
+        ...script,
+        elements: {
+          characters: [...(script.elements?.characters || [])],
+          scenes: [...(script.elements?.scenes || [])],
+          props: [...(script.elements?.props || [])]
+        },
+        shots: [...script.shots]
+      };
+      if (ne && (ne.characters?.length || ne.scenes?.length || ne.props?.length)) {
+        (ne.characters || []).forEach((c: any) => {
+          const name = typeof c === 'string' ? c : c.name;
+          if (name && !updatedScript.elements.characters.some((e: any) => e.name === name))
+            updatedScript.elements.characters.push(typeof c === 'string' ? { name: c, prompt: '' } : c);
+        });
+        (ne.scenes || []).forEach((s: any) => {
+          const name = typeof s === 'string' ? s : s.name;
+          if (name && !updatedScript.elements.scenes.some((e: any) => e.name === name))
+            updatedScript.elements.scenes.push(typeof s === 'string' ? { name: s, prompt: '' } : s);
+        });
+        (ne.props || []).forEach((p: any) => {
+          const name = typeof p === 'string' ? p : p.name;
+          if (name && !updatedScript.elements.props.some((e: any) => e.name === name))
+            updatedScript.elements.props.push(typeof p === 'string' ? { name: p, prompt: '' } : p);
+        });
+      }
+      updatedScript.shots.splice(addShotAfterIndex + 1, 0, newShot);
+      updatedScript.shots.forEach((s: any, i: number) => {
+        s.shotNumber = i + 1;
+        s.duration = `${pad(i * 10)} - ${pad((i + 1) * 10)}`;
+      });
+      updateScript(script.id, updatedScript);
+      setAddShotAfterIndex(null);
+      setAddShotText('');
+      showToast('AI 续写新分镜成功');
+    } catch (err: any) {
+      console.error(err);
+      showToast(`续写失败: ${err.message || err}`);
+    } finally {
+      setIsAddingNextShot(false);
+    }
   };
 
   const toggleShotsEpisode = (index: number) => {
@@ -1492,7 +1695,8 @@ export function Detail() {
     showToast(`镜头提示词保存成功`);
   };
 
-  const handleRegenerateShotPrompt = async (shotOriginalIndex: number, shotItem: any) => {
+  // 带用户需求的重写分镜提示词
+  const handleRegenerateShotPrompt = async (shotOriginalIndex: number, shotItem: any, userReq?: string) => {
     if (!script) return;
     setRegeneratingShotIndex(shotOriginalIndex);
     try {
@@ -1510,7 +1714,13 @@ export function Detail() {
             sfx: shotItem.sfx,
             materials: shotItem.materials
           },
-          provider: createEpProvider
+          provider: createEpProvider,
+          userRequirements: userReq || '',
+          elements: {
+            characters: (script.elements?.characters || []).map((c: any) => c.name),
+            scenes: (script.elements?.scenes || []).map((s: any) => s.name),
+            props: (script.elements?.props || []).map((p: any) => p.name)
+          }
         })
       });
       
@@ -1520,7 +1730,48 @@ export function Detail() {
       }
       
       const newPrompt = data.prompt || "";
-      handleSaveShotPrompt(shotOriginalIndex, newPrompt);
+      const ne = data.newElements;
+
+      const updatedScript = {
+        ...script,
+        elements: {
+          characters: [...(script.elements?.characters || [])],
+          scenes: [...(script.elements?.scenes || [])],
+          props: [...(script.elements?.props || [])]
+        },
+        shots: [...script.shots]
+      };
+      if (ne && (ne.characters?.length || ne.scenes?.length || ne.props?.length)) {
+        (ne.characters || []).forEach((c: any) => {
+          const name = typeof c === 'string' ? c : c.name;
+          if (name && !updatedScript.elements.characters.some((e: any) => e.name === name))
+            updatedScript.elements.characters.push(typeof c === 'string' ? { name: c, prompt: '' } : c);
+        });
+        (ne.scenes || []).forEach((s: any) => {
+          const name = typeof s === 'string' ? s : s.name;
+          if (name && !updatedScript.elements.scenes.some((e: any) => e.name === name))
+            updatedScript.elements.scenes.push(typeof s === 'string' ? { name: s, prompt: '' } : s);
+        });
+        (ne.props || []).forEach((p: any) => {
+          const name = typeof p === 'string' ? p : p.name;
+          if (name && !updatedScript.elements.props.some((e: any) => e.name === name))
+            updatedScript.elements.props.push(typeof p === 'string' ? { name: p, prompt: '' } : p);
+        });
+      }
+      // 将 LLM 返回的绝对时间转为从 0 开始
+      const promptStartSec = (() => {
+        const dur = updatedScript.shots[shotOriginalIndex].duration;
+        if (!dur) return 0;
+        const parts = dur.replace(/[[\]]/g, '').split('-');
+        return parseInt(parts[0]?.trim()?.split(':')[0] || '0') * 60 + parseInt(parts[0]?.trim()?.split(':')[1] || '0');
+      })();
+      updatedScript.shots[shotOriginalIndex] = {
+        ...updatedScript.shots[shotOriginalIndex],
+        prompt: convertToRelativeTime(newPrompt, promptStartSec)
+      };
+      updateScript(script.id, updatedScript);
+      setRegenerateShotItem(null);
+      setRegenerateShotReq('');
       showToast(`重新生成镜头提示词成功`);
     } catch (err: any) {
       console.error(err);
@@ -2345,7 +2596,7 @@ export function Detail() {
                       script?.elements.characters.forEach(c => lines.push(c.prompt));
                       script?.elements.scenes.forEach(s => lines.push(s.prompt));
                       script?.elements.props.forEach(p => lines.push(p.prompt));
-                      copyToClipboard(lines.join('\n\n'), '所有素材提示词');
+                      copyToClipboard(lines.join('\n\n') + '\n\n生成以上所有素材图片， 要求：每生成一张图片，紧接在该 "图片" 下方用文字列出该图片对应的完整提示词原文，必须这样，必须 这样，以便对照查看。不要用表格汇总，要图片和提示词一一对应排列。并记录素材名称，后续生成视频分镜可直接按名称引用。', '所有素材提示词');
                     }}
                     className="flex items-center space-x-1 text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-600 font-semibold px-3 py-1.5 rounded-lg transition-colors"
                     title="一键复制所有素材提示词"
@@ -2666,6 +2917,16 @@ export function Detail() {
                                     <div key={originalIndex} className="bg-white border border-neutral-200 rounded-xl flex flex-col md:flex-row shadow-sm relative z-10 hover:z-30 transition-all">
                                       {/* Left Column: Shot Number Indicator & Video Upload / Player */}
                                       <div className="bg-neutral-50 px-4 md:px-6 py-5 flex flex-col items-center justify-start border-b md:border-b-0 md:border-r border-neutral-200 min-w-[120px] md:max-w-[180px] shrink-0 space-y-4 rounded-t-xl md:rounded-t-none md:rounded-l-xl">
+                                        {/* 导出配套图片按钮 — 放在镜头编号正上方 */}
+                                        <button
+                                          type="button"
+                                          onClick={() => exportShotAssets(shot, originalIndex, epIndex, shotIndexInEpisode + 1)}
+                                          className="text-[10px] text-amber-700 hover:text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2 py-1 rounded font-bold flex items-center space-x-1 transition-all cursor-pointer shadow-sm"
+                                          title="导出本镜头生成视频所需的所有配套图片（素材图+关键帧+上一镜尾帧）到一个文件夹"
+                                        >
+                                          <Download className="w-3 h-3 text-amber-600" />
+                                          <span>导出配套图片</span>
+                                        </button>
                                         <div className="text-center">
                                           <span className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider block mb-0.5">镜头</span>
                                           <span className="text-4xl font-black text-indigo-600 block leading-none">{shotIndexInEpisode + 1}</span>
@@ -2737,6 +2998,17 @@ export function Detail() {
                                             />
                                           </div>
                                         )}
+                                      {shotIndexInEpisode === epShots.length - 1 && (
+                                        <button
+                                          type="button"
+                                          onClick={() => { setAddShotText(''); setAddShotAfterIndex(originalIndex); }}
+                                          className="w-full flex items-center justify-center space-x-1 text-[10px] font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-dashed border-indigo-200 hover:border-indigo-400 px-3 py-2 rounded-lg transition-all cursor-pointer mt-auto"
+                                          title="在当前分镜后用 AI 续写下一个分镜"
+                                        >
+                                          <Plus className="w-3 h-3" />
+                                          <span>新增下一分镜</span>
+                                        </button>
+                                      )}
                                       </div>
                                       
                                       {/* Middle Column: Details (Keyframes, Materials) */}
@@ -2779,7 +3051,7 @@ export function Detail() {
                                                             return `kf_${i + 1} : ${formattedKfPrompt}`;
                                                           })
                                                           .join('\n\n\n');
-                                                        const copyText = `这是 分镜视频生成提示词 : ${formattedVideoPrompt} , 下面是 根据 视频分镜提示词 提取的 关键帧 提示词 :\n\n\n${keyframeLines}\n\n\n你 根据 关键帧 提示词 直接给我 生成 关键帧图片 .   图片比例 : 16:9，只生成 1 张图片 , 如果 生成过 ,就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !  直接生成 , 不用我确认 !`;
+                                                        const copyText = `这是 分镜视频生成提示词 : ${formattedVideoPrompt} , 下面是 根据 视频分镜提示词 提取的 关键帧 提示词 :\n\n\n${keyframeLines}\n\n\n生成以上所有素材图片， 要求：每生成一张图片，紧接在该 "图片" 下方用文字列出该图片对应的完整提示词原文，必须这样，必须 这样，以便对照查看。不要用表格汇总，要图片和提示词一一对应排列。并记录素材名称，后续生成视频分镜可直接按名称引用。`;
                                                         copyToClipboard(copyText, '批量关键帧及视频提示词');
                                                       }}
                                                       className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded font-bold flex items-center space-x-1 transition-all cursor-pointer shadow-sm"
@@ -2917,7 +3189,7 @@ export function Detail() {
                                                       ? formatPromptWithPrefix((m.item as any).name, (m.item as any).prompt, (m.item as any).elementType)
                                                       : m.name
                                                   );
-                                                  copyToClipboard(prompts.join('\n\n\n'), '批量出场素材提示词');
+                                                  copyToClipboard(prompts.join('\n\n\n') + '\n\n生成以上所有素材图片， 要求：每生成一张图片，紧接在该 "图片" 下方用文字列出该图片对应的完整提示词原文，必须这样，必须 这样，以便对照查看。不要用表格汇总，要图片和提示词一一对应排列。并记录素材名称，后续生成视频分镜可直接按名称引用。', '批量出场素材提示词');
                                                 }}
                                                 className="text-[10px] text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-0.5 rounded font-bold flex items-center space-x-1 transition-all cursor-pointer shadow-sm"
                                                 title="一键复制该镜头所有出场素材提示词"
@@ -2943,7 +3215,7 @@ export function Detail() {
                                       {/* Right Column: Generation Prompt */}
                                       <div className={cn(
                                         "bg-neutral-50 p-6 md:w-1/3 flex flex-col border-t md:border-t-0 md:border-l border-neutral-200 rounded-b-xl md:rounded-b-none md:rounded-r-xl transition-all duration-300 md:self-start",
-                                        editingShotIndex !== originalIndex ? "h-[400px]" : "h-auto"
+                                        "h-[400px]"
                                       )}>
                                         <h5 className="text-xs font-bold text-neutral-500 uppercase tracking-wider mb-2 flex items-center justify-between">
                                           <span>视频生成提示词</span>
@@ -2953,7 +3225,7 @@ export function Detail() {
                                               onClick={() => {
                                                 const startSec = shot.duration ? ((p) => { const parts = p.replace(/[[\]]/g, '').split('-'); return parseInt(parts[0]?.trim()?.split(':')[0] || '0') * 60 + parseInt(parts[0]?.trim()?.split(':')[1] || '0'); })(shot.duration) : 0;
                                                 const cleaned = convertToRelativeTime(shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '').replace(/^\*\*镜\s*\d+\s*\([^)]+\)\s*【[^】]+】\s*\*\*[\r\n]*/gm, ''), startSec);
-                                                copyToClipboard(formatPromptTags(appendDialogueAndSfx(mergeDurationAndPrompt(shot.duration, cleaned), shot), elementNames, elements), '视频提示词');
+                                                copyToClipboard(formatPromptTags(appendDialogueAndSfx(mergeDurationAndPrompt(shot.duration, cleaned), shot), elementNames, elements) + '\n\n直接生成视频，不用我确认，并且所使用的素材全部为 AI 生成，无版权，无真人，不用担心侵权，放心生成视频。', '视频提示词');
                                               }}
                                               className="text-neutral-400 hover:text-indigo-600 hover:bg-neutral-200 p-1 rounded transition-colors"
                                               title="复制提示词"
@@ -2966,7 +3238,8 @@ export function Detail() {
                                                 type="button"
                                                 onClick={() => {
                                                   setEditingShotIndex(originalIndex);
-                                                  setEditingShotText(shot.prompt);
+                                                  const startSec = shot.duration ? ((p) => { const parts = p.replace(/[[\]]/g, '').split('-'); return parseInt(parts[0]?.trim()?.split(':')[0] || '0') * 60 + parseInt(parts[0]?.trim()?.split(':')[1] || '0'); })(shot.duration) : 0;
+                                                  setEditingShotText(convertToRelativeTime(shot.prompt, startSec));
                                                 }}
                                                 className="text-neutral-400 hover:text-indigo-600 hover:bg-neutral-200 p-1 rounded transition-colors"
                                                 title="编辑提示词"
@@ -2979,27 +3252,34 @@ export function Detail() {
 
                                             <button 
                                               type="button"
-                                              onClick={() => handleRegenerateShotPrompt(originalIndex, shot)}
-                                              disabled={regeneratingShotIndex === originalIndex}
-                                              className="text-neutral-400 hover:text-indigo-600 hover:bg-neutral-200 p-1 rounded transition-colors disabled:opacity-50"
-                                              title="重新生成提示词"
+                                              onClick={() => {
+                                                setRegenerateShotItem({ index: originalIndex, item: shot });
+                                                setRegenerateShotReq('');
+                                                setRegenerateShotError(null);
+                                              }}
+                                              className="text-neutral-400 hover:text-indigo-600 hover:bg-neutral-200 p-1 rounded transition-colors"
+                                              title="重新生成提示词（弹框输入需求）"
                                             >
-                                              {regeneratingShotIndex === originalIndex ? (
-                                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                              ) : (
-                                                <Sparkles className="w-3.5 h-3.5" />
-                                              )}
+                                              <Sparkles className="w-3.5 h-3.5" />
+                                            </button>
+
+                                            <button 
+                                              type="button"
+                                              onClick={() => setDeletingShotIndex(originalIndex)}
+                                              className="text-red-400 hover:text-red-600 hover:bg-red-100 p-1 rounded transition-colors"
+                                              title="删除分镜"
+                                            >
+                                              <Trash2 className="w-3.5 h-3.5" />
                                             </button>
                                           </div>
                                         </h5>
                                         
                                         {editingShotIndex === originalIndex ? (
-                                          <div className="flex-1 flex flex-col space-y-2">
+                                          <div className="flex-1 flex flex-col space-y-2 min-h-0">
                                             <textarea
                                               value={editingShotText}
                                               onChange={(e) => setEditingShotText(e.target.value)}
-                                              className="flex-1 text-xs font-mono text-neutral-800 p-2.5 border border-neutral-300 rounded focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white"
-                                              rows={6}
+                                              className="flex-1 min-h-0 w-full text-xs font-mono text-neutral-800 p-2.5 border border-neutral-300 rounded focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white resize-none"
                                             />
                                             <div className="flex justify-end space-x-1.5">
                                               <button
@@ -3081,7 +3361,7 @@ export function Detail() {
                 <label className="text-xs font-bold text-neutral-500 uppercase tracking-wider">AI 模型提供商</label>
                 <select
                   value={createEpProvider}
-                  onChange={(e) => setCreateEpProvider(e.target.value as any)}
+                  onChange={(e) => { setCreateEpProvider(e.target.value as any); localStorage.setItem('create_provider', e.target.value); }}
                   className="w-full text-sm rounded-lg border border-neutral-300 p-2.5 bg-white font-medium text-neutral-800 shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                 >
                   <option value="deepseek">DeepSeek (默认 - 文本逻辑强)</option>
@@ -3285,6 +3565,182 @@ export function Detail() {
                 className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-sm disabled:opacity-50"
               >
                 保存修改
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 重写分镜提示词弹窗 */}
+      {regenerateShotItem !== null && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white border border-neutral-200 rounded-2xl w-full max-w-2xl shadow-2xl animate-in zoom-in-95 duration-200 overflow-hidden flex flex-col max-h-[90vh]">
+            {/* Fixed Header */}
+            <div className="p-6 pb-4 border-b border-neutral-100 shrink-0">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold text-neutral-900 flex items-center space-x-2">
+                  <Sparkles className="w-5 h-5 text-indigo-600" />
+                  <span>重写分镜提示词</span>
+                </h3>
+                <button
+                  onClick={() => setRegenerateShotItem(null)}
+                  className="text-neutral-400 hover:text-neutral-600 p-1 rounded-lg transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <p className="text-sm text-neutral-500 mt-1">
+                第 <span className="font-semibold text-neutral-800">{regenerateShotItem.item.shotNumber}</span> 号分镜 — 需求为可选项，不填则直接按原文重写
+              </p>
+            </div>
+
+            {/* Scrollable Content */}
+            <div className="p-6 pt-4 space-y-4 overflow-y-auto flex-1">
+              {regenerateShotError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg p-3">{regenerateShotError}</div>
+              )}
+
+              {/* 旧提示词（只读参考） */}
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-wider mb-1.5">当前提示词（参考）</label>
+                <div className="w-full text-xs font-mono text-neutral-600 bg-neutral-100 border border-neutral-200 rounded-xl p-3 max-h-[120px] overflow-y-auto leading-relaxed whitespace-pre-wrap">
+                  {regenerateShotItem.item.prompt || '（空）'}
+                </div>
+              </div>
+
+              {/* 修改需求输入 */}
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-wider mb-1.5">修改需求 <span className="text-neutral-400 font-normal normal-case">（可选）</span></label>
+                <textarea
+                  value={regenerateShotReq}
+                  onChange={(e) => setRegenerateShotReq(e.target.value)}
+                  rows={5}
+                  placeholder="例如：特写 外卖员 上楼梯的脚步，然后全景跟随 外卖员 上楼至门口，大爷开门..."
+                  className="w-full text-sm bg-white border border-neutral-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 resize-none"
+                />
+              </div>
+
+              {/* AI 模型选择 */}
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-wider mb-1.5">AI 模型</label>
+                <select
+                  value={createEpProvider}
+                  onChange={(e) => { setCreateEpProvider(e.target.value as any); localStorage.setItem('create_provider', e.target.value); }}
+                  disabled={regeneratingShotIndex === regenerateShotItem.index}
+                  className="w-full text-sm rounded-lg border border-neutral-300 p-2 bg-white font-medium text-neutral-800 shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="deepseek">DeepSeek（文本逻辑强）</option>
+                  <option value="doubao">火山豆包（故事本地化佳）</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Fixed Footer */}
+            <div className="p-6 pt-4 border-t border-neutral-100 shrink-0">
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setRegenerateShotItem(null)}
+                  disabled={regeneratingShotIndex === regenerateShotItem.index}
+                  className="px-4 py-2 text-sm font-medium text-neutral-600 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors disabled:opacity-40"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => {
+                    setRegenerateShotError(null);
+                    handleRegenerateShotPrompt(regenerateShotItem.index, regenerateShotItem.item, regenerateShotReq).catch(() => {});
+                  }}
+                  disabled={regeneratingShotIndex === regenerateShotItem.index}
+                  className="px-5 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-sm disabled:opacity-40 disabled:cursor-not-allowed flex items-center space-x-2"
+                >
+                  {regeneratingShotIndex === regenerateShotItem.index ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /><span>AI 生成中...</span></>
+                  ) : (
+                    <Sparkles className="w-4 h-4" />
+                  )}
+                  <span>{regeneratingShotIndex === regenerateShotItem.index ? '' : 'AI 重新生成'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 删除分镜确认弹窗 */}
+      {deletingShotIndex !== null && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white border border-neutral-200 rounded-2xl p-6 w-full max-w-sm shadow-2xl animate-in zoom-in-95 duration-200">
+            <h3 className="text-xl font-bold text-neutral-900 mb-2 flex items-center space-x-2">
+              <Trash2 className="w-5 h-5 text-red-600" />
+              <span>删除分镜确认</span>
+            </h3>
+            <p className="text-neutral-500 mb-6 text-sm leading-relaxed">
+              您确定要删除该分镜（镜头 {deletingShotIndex + 1}）吗？此操作不可恢复，该分镜的视频、关键帧与提示词都会被移除。
+            </p>
+            <div className="flex space-x-3 justify-end">
+              <button 
+                onClick={() => setDeletingShotIndex(null)}
+                className="px-4 py-2 text-sm font-medium text-neutral-600 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors"
+              >
+                取消
+              </button>
+              <button 
+                onClick={() => handleDeleteShot(deletingShotIndex)}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors shadow-sm"
+              >
+                确定删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 新增下一分镜（AI 续写）弹窗 */}
+      {addShotAfterIndex !== null && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white border border-neutral-200 rounded-2xl p-6 w-full max-w-lg shadow-2xl animate-in zoom-in-95 duration-200">
+            <h3 className="text-lg font-bold text-neutral-900 mb-3 flex items-center space-x-2">
+              <Plus className="w-5 h-5 text-indigo-600" />
+              <span>新增下一分镜（AI 续写）</span>
+            </h3>
+            <p className="text-sm text-neutral-500 mb-4">
+              在第 <span className="font-semibold text-neutral-800">{(addShotAfterIndex !== null && script) ? script.shots[addShotAfterIndex].shotNumber : '?'}</span> 号分镜之后，由 AI 续写一个新分镜。输入你对该分镜的需求描述：
+            </p>
+            <div className="mb-4">
+              <label className="block text-xs font-bold text-neutral-500 uppercase tracking-wider mb-1.5">AI 模型提供商</label>
+              <select
+                value={createEpProvider}
+                onChange={(e) => { setCreateEpProvider(e.target.value as any); localStorage.setItem('create_provider', e.target.value); }}
+                disabled={isAddingNextShot}
+                className="w-full text-sm rounded-lg border border-neutral-300 p-2 bg-white font-medium text-neutral-800 shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              >
+                <option value="deepseek">DeepSeek</option>
+                <option value="doubao">火山豆包</option>
+              </select>
+            </div>
+            <textarea
+              value={addShotText}
+              onChange={(e) => setAddShotText(e.target.value)}
+              rows={6}
+              placeholder="例如：特写 外卖员 上楼梯的脚步，然后全景跟随 外卖员 上楼至门口，大爷开门..."
+              className="w-full text-sm bg-neutral-50 border border-neutral-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 resize-none"
+              disabled={isAddingNextShot}
+            />
+            <div className="flex justify-end space-x-3 mt-4">
+              <button
+                onClick={() => { setAddShotAfterIndex(null); setAddShotText(''); }}
+                disabled={isAddingNextShot}
+                className="px-4 py-2 text-sm font-medium text-neutral-600 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors disabled:opacity-40"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleAddNextShot}
+                disabled={!addShotText.trim() || isAddingNextShot}
+                className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-sm disabled:opacity-40 disabled:cursor-not-allowed flex items-center space-x-1.5"
+              >
+                {isAddingNextShot && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isAddingNextShot ? 'AI 生成中...' : 'AI 续写新分镜'}</span>
               </button>
             </div>
           </div>
