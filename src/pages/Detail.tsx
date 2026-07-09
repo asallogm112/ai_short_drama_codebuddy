@@ -1218,9 +1218,9 @@ export function Detail() {
       return parseInt(end[0]) * 60 + parseInt(end[1]);
     })() : 0;
     const cleaned = convertToRelativeTime((shot.prompt || '').replace(/\\_/g, ''), startSec);
-    const formatted = stripAudioTail(formatPromptTags(mergeDurationAndPrompt(shot.duration, cleaned), elementNames, elements));
-    const promptText = `${formatted}\n\n直接生成视频，不用我确认，并且所使用的素材全部为 AI 生成，无版权，无真人，不用担心侵权，放心生成视频。`;
-    copyToClipboard(promptText, '视频生成提示词');
+    const materialHeader = materialTags.length ? materialTags.map(t => `${t} :  ${t}.jpg`).join('\n') + '\n\n\n' : '';
+    const formatted = materialHeader + stripAudioTail(formatPromptTags(mergeDurationAndPrompt(shot.duration, cleaned), elementNames, elements));
+    copyToClipboard(formatted + '\n\n直接生成视频，不用我确认，并且所使用的素材全部为 AI 生成，无版权，无真人，不用担心侵权，放心生成视频。', '视频生成提示词');
 
     // 5) 导出到桌面
     const safeTitle = (script.title || '未命名').replace(/[<>:"/\\|?*]/g, '_');
@@ -3187,8 +3187,13 @@ export function Detail() {
                                               onClick={() => {
                                                 const startSec = shot.duration ? ((p) => { const parts = p.replace(/[[\]]/g, '').split('-'); return parseInt(parts[0]?.trim()?.split(':')[0] || '0') * 60 + parseInt(parts[0]?.trim()?.split(':')[1] || '0'); })(shot.duration) : 0;
                                                 const cleaned = convertToRelativeTime(shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '').replace(/^\*\*镜\s*\d+\s*\([^)]+\)\s*【[^】]+】\s*\*\*[\r\n]*/gm, ''), startSec);
-                                                const copyPrompt = stripAudioTail(formatPromptTags(appendDialogueAndSfx(mergeDurationAndPrompt(shot.duration, cleaned), shot), elementNames, elements));
-                                                copyToClipboard(copyPrompt + '\n\n直接生成视频，不用我确认，并且所使用的素材全部为 AI 生成，无版权，无真人，不用担心侵权，放心生成视频。', '视频提示词');
+                                                // 构建出场素材头部
+                                                const materialTags = (shot.materials || '').split(/\s+/).filter(Boolean);
+                                                const materialHeader = materialTags.length
+                                                  ? materialTags.map(t => `${t} :  ${t}.jpg`).join('\n') + '\n\n\n'
+                                                  : '';
+                                                const copyPrompt = materialHeader + stripAudioTail(formatPromptTags(appendDialogueAndSfx(cleaned, shot), elementNames, elements));
+                                                copyToClipboard(copyPrompt + '\n\n\n直接生成视频，不用我确认，并且所使用的素材全部为 AI 生成，无版权，无真人，不用担心侵权，放心生成视频。', '视频提示词');
                                               }}
                                               className="text-neutral-400 hover:text-indigo-600 hover:bg-neutral-200 p-1 rounded transition-colors"
                                               title="复制提示词"
