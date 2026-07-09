@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useScripts } from '../hooks/useScripts';
+import { useMaterials } from '../hooks/useMaterials';
 import { 
   ArrowLeft, 
   BookOpen, 
@@ -24,7 +25,8 @@ import {
   Pencil,
   Trash2,
   Download,
-  Play
+  Play,
+  BookmarkPlus,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -777,16 +779,20 @@ const CollapsiblePrompt = ({
   hoverClass, 
   onCopy,
   onSave,
-  onRegenerate
+  onRegenerate,
+  onSaveToLibrary,
+  regenerating
 }: { 
   title: string, 
   prompt: string, 
   hoverClass: string, 
   onCopy: () => void,
   onSave?: (newPrompt: string) => void,
-  onRegenerate?: () => Promise<void>
+  onRegenerate?: () => Promise<void>,
+  onSaveToLibrary?: () => void,
+  regenerating?: boolean
 }) => {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const [isEditing, setIsEditing] = useState(false);
   const [editedText, setEditedText] = useState(prompt);
   const [isRegenerating, setIsRegenerating] = useState(false);
@@ -824,7 +830,7 @@ const CollapsiblePrompt = ({
   };
 
   return (
-    <div className="pl-6 pr-3 py-4 bg-neutral-50 relative group/prompt border-t border-neutral-100 text-left">
+    <div className="pl-3 pr-3 py-4 bg-neutral-50 relative group/prompt border-t border-neutral-100 text-left">
       <div 
         className="flex items-center justify-between cursor-pointer"
         onClick={() => setExpanded(!expanded)}
@@ -843,6 +849,17 @@ const CollapsiblePrompt = ({
             <Copy className="w-3 h-3 text-current" />
           </button>
 
+          {onSaveToLibrary && (
+            <button 
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onSaveToLibrary(); }}
+              title="保存到素材库"
+              className="p-1.5 bg-white border border-neutral-200 shadow-sm rounded text-neutral-500 hover:bg-indigo-50 hover:text-indigo-600 transition-all flex items-center justify-center"
+            >
+              <BookmarkPlus className="w-3 h-3 text-current" />
+            </button>
+          )}
+
           {onSave && !isEditing && (
             <button 
               type="button"
@@ -859,10 +876,10 @@ const CollapsiblePrompt = ({
             <button 
               type="button"
               onClick={handleRegenerateClick}
-              disabled={isRegenerating}
+              disabled={isRegenerating || regenerating}
               className="p-1.5 bg-white border border-neutral-200 shadow-sm rounded text-neutral-500 hover:bg-neutral-50 hover:text-indigo-600 transition-all flex items-center justify-center disabled:opacity-50"
             >
-              {isRegenerating ? (
+              {isRegenerating || regenerating ? (
                 <Loader2 className="w-3 h-3 animate-spin text-current" />
               ) : (
                 <Sparkles className="w-3 h-3 text-current" />
@@ -900,7 +917,7 @@ const CollapsiblePrompt = ({
               </div>
             </div>
           ) : (
-            <div className="text-xs font-mono text-neutral-600 leading-relaxed break-words bg-white p-3.5 rounded-lg border border-neutral-200">
+            <div className="text-xs font-mono text-neutral-600 leading-relaxed break-words bg-white p-3.5 rounded-lg border border-neutral-200 max-h-[187px] overflow-y-auto">
               {prompt.replace(/\\_/g, '')}
             </div>
           )}
@@ -914,6 +931,7 @@ export function Detail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { getScript, deleteScript, updateScript } = useScripts();
+  const { addMaterial } = useMaterials();
   
   const script = getScript(id || '');
   const elements = script ? [
@@ -1028,6 +1046,7 @@ export function Detail() {
   const [deletingEpIndex, setDeletingEpIndex] = useState<number | null>(null);
   
   const [regeneratingEpIndex, setRegeneratingEpIndex] = useState<number | null>(null);
+  const [regenerateEpModalIndex, setRegenerateEpModalIndex] = useState<number | null>(null);
   const [regenerateEpPrompt, setRegenerateEpPrompt] = useState<string>('');
   const [regenerateEpProvider, setRegenerateEpProvider] = useState<string>(() => localStorage.getItem('create_provider') || 'deepseek');
   const [isRegeneratingEpisode, setIsRegeneratingEpisode] = useState<boolean>(false);
@@ -1042,13 +1061,19 @@ export function Detail() {
   const [addShotAfterIndex, setAddShotAfterIndex] = useState<number | null>(null);
   const [addShotText, setAddShotText] = useState('');
   const [isAddingNextShot, setIsAddingNextShot] = useState(false);
+  const [addingShotIndex, setAddingShotIndex] = useState<number | null>(null);
   // 重写分镜提示词弹窗状态
   const [regenerateShotItem, setRegenerateShotItem] = useState<{ index: number; item: any } | null>(null);
   const [regenerateShotReq, setRegenerateShotReq] = useState('');
   const [regenerateShotError, setRegenerateShotError] = useState<string | null>(null);
+  // 重写素材（角色/场景/道具）提示词弹窗状态
+  const [regenerateElementItem, setRegenerateElementItem] = useState<{ type: 'characters' | 'scenes' | 'props'; index: number; name: string; description: string; prompt: string } | null>(null);
+  const [regenerateElementReq, setRegenerateElementReq] = useState('');
+  const [regenerateElementError, setRegenerateElementError] = useState<string | null>(null);
+    const [regeneratingElementKey, setRegeneratingElementKey] = useState<string | null>(null);
 
   // 解析并导入素材（角色/场景/道具）
-  const handleImportElements = () => {
+  const handleImportElements = async () => {
     if (!script) return;
     setImportError(null);
     const text = importText.trim();
@@ -1057,6 +1082,7 @@ export function Detail() {
     const chars: any[] = [], scenes: any[] = [], props: any[] = [];
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
+    // 1) 先尝试原有结构化格式（零 API 消耗，兼容旧用法）
     for (const line of lines) {
       // 格式: R1_XX  :  提示词内容 或 S1_XX  :  提示词 或 P1_XX  :  提示词
       const match = line.match(/^([RSP])(\d+)_(.+?)\s*[:：]\s*(.+)/);
@@ -1085,8 +1111,43 @@ export function Detail() {
       }
     }
 
+    // 2) 结构化解析为空，则交给 LLM 智能识别（任意格式/自然语言皆可）
     if (chars.length === 0 && scenes.length === 0 && props.length === 0) {
-      setImportError('未能解析出素材，请确保格式为：R1_名称  :  提示词');
+      setImportError('AI 正在智能识别素材，请稍候…');
+      try {
+        const provider = localStorage.getItem('create_provider') || 'deepseek';
+        const res = await fetch('/api/parse-elements', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, provider })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '解析失败');
+        const pushItems = (target: any[], key: string) => {
+          (data[key] || []).forEach((it: any) => {
+            if (!it || !it.name) return;
+            const item = {
+              name: it.name,
+              description: (it.prompt || '').substring(0, 60),
+              prompt: it.prompt || ''
+            };
+            const ex = target.findIndex((x: any) => x.name === it.name);
+            if (ex >= 0) target[ex] = item;
+            else target.push(item);
+          });
+        };
+        pushItems(chars, 'characters');
+        pushItems(scenes, 'scenes');
+        pushItems(props, 'props');
+      } catch (err: any) {
+        setImportError('AI 智能解析失败：' + (err.message || err) + '。也可按 R1_名称 : 提示词 格式手动粘贴。');
+        return;
+      }
+    }
+
+    // 3) 都没解析到任何素材
+    if (chars.length === 0 && scenes.length === 0 && props.length === 0) {
+      setImportError('未能从文本中识别出任何素材，请补充更多角色/场景/道具描述。');
       return;
     }
 
@@ -1101,6 +1162,7 @@ export function Detail() {
     updateScript(script.id, newScript);
     setIsImportElementsOpen(false);
     setImportText('');
+    setImportError(null);
     showToast(`已导入 ${chars.length} 个角色, ${scenes.length} 个场景, ${props.length} 个道具`);
   };
 
@@ -1275,6 +1337,7 @@ export function Detail() {
     // 立即关闭弹窗
     setAddShotAfterIndex(null);
     setAddShotText('');
+    setAddingShotIndex(idx);
     setIsAddingNextShot(true);
     try {
       const res = await fetch("/api/regenerate-prompt", {
@@ -1340,6 +1403,7 @@ export function Detail() {
       showToast(`续写失败: ${err.message || err}`);
     } finally {
       setIsAddingNextShot(false);
+      setAddingShotIndex(null);
     }
   };
 
@@ -1664,7 +1728,8 @@ export function Detail() {
     index: number,
     name: string,
     description: string,
-    currentPrompt: string
+    currentPrompt: string,
+    userReq?: string
   ) => {
     try {
       const res = await fetch('/api/regenerate-prompt', {
@@ -1675,6 +1740,7 @@ export function Detail() {
           name,
           description,
           currentPrompt,
+          userRequirements: userReq || '',
           provider: createEpProvider
         })
       });
@@ -1934,6 +2000,7 @@ export function Detail() {
   const handleCreateEpisodeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsCreatingEpisode(true);
+    setIsCreateEpisodeOpen(false);
     setCreateEpError(null);
 
     const currentStoryParagraphs = (script.story || '').split('\n').map(p => p.trim()).filter(Boolean);
@@ -2095,25 +2162,29 @@ export function Detail() {
   };
 
   const handleRegenerateEpisodeClick = (index: number) => {
-    setRegeneratingEpIndex(index);
+    setRegenerateEpModalIndex(index);
     setRegenerateEpPrompt('');
     setRegenerateEpError(null);
   };
 
   const confirmRegenerateEpisode = async () => {
-    if (regeneratingEpIndex === null || !script) return;
+    const epIdx = regenerateEpModalIndex;
+    if (epIdx === null || !script) return;
+    // 立即关闭弹框，加载状态转移到触发按钮
+    setRegenerateEpModalIndex(null);
+    setRegeneratingEpIndex(epIdx);
     setIsRegeneratingEpisode(true);
     setRegenerateEpError(null);
 
     try {
       const paragraphs = (script.story || '').split('\n').map(p => p.trim()).filter(Boolean);
-      const existingStoryUpToNow = paragraphs.slice(0, regeneratingEpIndex).join('\n\n');
+      const existingStoryUpToNow = paragraphs.slice(0, epIdx).join('\n\n');
 
       let payloadPrompt = regenerateEpPrompt.trim();
       if (!payloadPrompt) {
-        payloadPrompt = `当前本集的故事大纲是：“${paragraphs[regeneratingEpIndex]}”。请根据以上信息和前文发展，重新编写第 ${regeneratingEpIndex + 1} 集的故事大纲和对应的详细分镜头脚本。`;
+        payloadPrompt = `当前本集的故事大纲是：“${paragraphs[epIdx]}”。请根据以上信息和前文发展，重新编写第 ${epIdx + 1} 集的故事大纲和对应的详细分镜头脚本。`;
       } else {
-        payloadPrompt = `当前本集故事是大纲是：“${paragraphs[regeneratingEpIndex]}”。用户要求在这基础上进行重新修改生成，具体修改要求如下：${payloadPrompt}`;
+        payloadPrompt = `当前本集故事是大纲是：“${paragraphs[epIdx]}”。用户要求在这基础上进行重新修改生成，具体修改要求如下：${payloadPrompt}`;
       }
 
       const formData = new FormData();
@@ -2121,7 +2192,7 @@ export function Detail() {
       formData.append('type', 'write');
       formData.append('continuationPrompt', payloadPrompt);
       formData.append('existingStory', existingStoryUpToNow);
-      formData.append('currentEpisodeCount', regeneratingEpIndex.toString());
+      formData.append('currentEpisodeCount', epIdx.toString());
       formData.append('elements', JSON.stringify(script.elements));
 
       const response = await fetch('/api/continue', {
@@ -2136,16 +2207,16 @@ export function Detail() {
 
       const newStoryParagraph = data.storyParagraph || '未提供故事大纲';
       const updatedParagraphs = [...paragraphs];
-      updatedParagraphs[regeneratingEpIndex] = newStoryParagraph;
+      updatedParagraphs[epIdx] = newStoryParagraph;
       const updatedStory = updatedParagraphs.join('\n\n');
 
       // Filter out old shots for this episode
-      const filteredShots = script.shots.filter(shot => shot.episodeIndex !== regeneratingEpIndex);
+      const filteredShots = script.shots.filter(shot => shot.episodeIndex !== epIdx);
       
       // Map and format new shots
       const newShots = (data.shots || []).map((shot: any) => ({
         ...shot,
-        episodeIndex: regeneratingEpIndex,
+        episodeIndex: epIdx,
         keyframes: ['', '', '', ''],
         videoUrl: ''
       }));
@@ -2194,14 +2265,14 @@ export function Detail() {
       };
 
       updateScript(script.id, updatedScript);
-      showToast(`第 ${toChineseNumeral(regeneratingEpIndex + 1)} 集大纲与镜头已成功重新生成！`);
-      setRegeneratingEpIndex(null);
+      showToast(`第 ${toChineseNumeral(epIdx + 1)} 集大纲与镜头已成功重新生成！`);
       setRegenerateEpPrompt('');
     } catch (err: any) {
       console.error(err);
       setRegenerateEpError(err.message || '重新生成失败');
     } finally {
       setIsRegeneratingEpisode(false);
+      setRegeneratingEpIndex(null);
     }
   };
 
@@ -2510,9 +2581,11 @@ export function Detail() {
                     <button
                       type="button"
                       onClick={() => setIsCreateEpisodeOpen(true)}
-                      className="flex items-center space-x-1.5 text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-3.5 py-2 rounded-lg transition-colors shadow-sm"
+                      disabled={isCreatingEpisode}
+                      className="flex items-center space-x-1.5 text-xs bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-semibold px-3.5 py-2 rounded-lg transition-colors shadow-sm disabled:cursor-not-allowed"
+                      title={isCreatingEpisode ? 'AI 生成中...' : '新建集数'}
                     >
-                      <Plus className="w-4 h-4" />
+                      {isCreatingEpisode ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
                       <span>新建集数</span>
                     </button>
                     <div className="flex items-center space-x-2 text-neutral-400 cursor-pointer select-none" onClick={toggleEpisodeList}>
@@ -2563,11 +2636,12 @@ export function Detail() {
                                       <button
                                         type="button"
                                         onClick={() => handleRegenerateEpisodeClick(index)}
-                                        className="p-1 text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 rounded transition-colors flex items-center space-x-1 text-xs px-2 font-medium"
-                                        title="重新生成 (AI生成)"
+                                        disabled={regeneratingEpIndex === index}
+                                        className="p-1 text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 rounded transition-colors flex items-center space-x-1 text-xs px-2 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                        title={regeneratingEpIndex === index ? 'AI 生成中...' : '重新生成 (AI生成)'}
                                       >
-                                        <Sparkles className="w-3.5 h-3.5" />
-                                        <span className="hidden sm:inline">重新生成</span>
+                                        {regeneratingEpIndex === index ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                                        <span className="hidden sm:inline">{regeneratingEpIndex === index ? '生成中' : '重新生成'}</span>
                                       </button>
                                       <button
                                         type="button"
@@ -2716,16 +2790,32 @@ export function Detail() {
                     </div>
                     
                     <CollapsiblePrompt 
-                      title="生成提示词 (Prompt)"
+                      title="生成提示词"
                       prompt={formatPromptWithPrefix(char.name, char.prompt, 'characters')}
                       hoverClass="hover:bg-indigo-50 hover:border-indigo-200 hover:text-indigo-600"
                       onCopy={() => copyToClipboard(formatPromptWithPrefix(char.name, char.prompt, 'characters'), '角色提示词')}
                       onSave={(newVal) => {
                         handleSaveElementPrompt('characters', i, newVal);
                       }}
-                      onRegenerate={async () => {
-                        await handleRegenerateElementPrompt('characters', i, char.name, char.description, char.prompt);
+                      onSaveToLibrary={() => {
+                        if (!script) return;
+                        const res = addMaterial({
+                          type: 'characters',
+                          name: char.name,
+                          description: char.description,
+                          prompt: char.prompt,
+                          imageUrl: char.imageUrl,
+                          sourceScriptId: script.id,
+                          sourceScriptTitle: script.title,
+                        });
+                        showToast(res.added ? '已保存到素材库' : '该素材已在素材库中（已更新）');
                       }}
+                      onRegenerate={() => {
+                        setRegenerateElementItem({ type: 'characters', index: i, name: char.name, description: char.description, prompt: char.prompt });
+                        setRegenerateElementReq('');
+                        setRegenerateElementError(null);
+                      }}
+                      regenerating={regeneratingElementKey === `characters_${i}`}
                     />
                   </div>
                 ))}
@@ -2786,16 +2876,32 @@ export function Detail() {
                     </div>
                     
                     <CollapsiblePrompt 
-                      title="生成提示词 (Prompt)"
+                      title="生成提示词"
                       prompt={formatPromptWithPrefix(scene.name, scene.prompt, 'scenes')}
                       hoverClass="hover:bg-emerald-50 hover:border-emerald-200 hover:text-emerald-600"
                       onCopy={() => copyToClipboard(formatPromptWithPrefix(scene.name, scene.prompt, 'scenes'), '场景提示词')}
                       onSave={(newVal) => {
                         handleSaveElementPrompt('scenes', i, newVal);
                       }}
-                      onRegenerate={async () => {
-                        await handleRegenerateElementPrompt('scenes', i, scene.name, scene.description, scene.prompt);
+                      onSaveToLibrary={() => {
+                        if (!script) return;
+                        const res = addMaterial({
+                          type: 'scenes',
+                          name: scene.name,
+                          description: scene.description,
+                          prompt: scene.prompt,
+                          imageUrl: scene.imageUrl,
+                          sourceScriptId: script.id,
+                          sourceScriptTitle: script.title,
+                        });
+                        showToast(res.added ? '已保存到素材库' : '该素材已在素材库中（已更新）');
                       }}
+                      onRegenerate={() => {
+                        setRegenerateElementItem({ type: 'scenes', index: i, name: scene.name, description: scene.description, prompt: scene.prompt });
+                        setRegenerateElementReq('');
+                        setRegenerateElementError(null);
+                      }}
+                      regenerating={regeneratingElementKey === `scenes_${i}`}
                     />
                   </div>
                 ))}
@@ -2857,16 +2963,32 @@ export function Detail() {
                     </div>
                     
                     <CollapsiblePrompt 
-                      title="生成提示词 (Prompt)"
+                      title="生成提示词"
                       prompt={formatPromptWithPrefix(prop.name, prop.prompt, 'props')}
                       hoverClass="hover:bg-amber-50 hover:border-amber-200 hover:text-amber-600"
                       onCopy={() => copyToClipboard(formatPromptWithPrefix(prop.name, prop.prompt, 'props'), '道具提示词')}
                       onSave={(newVal) => {
                         handleSaveElementPrompt('props', i, newVal);
                       }}
-                        onRegenerate={async () => {
-                          await handleRegenerateElementPrompt('props', i, prop.name, prop.description, prop.prompt);
+                      onSaveToLibrary={() => {
+                        if (!script) return;
+                        const res = addMaterial({
+                          type: 'props',
+                          name: prop.name,
+                          description: prop.description,
+                          prompt: prop.prompt,
+                          imageUrl: prop.imageUrl,
+                          sourceScriptId: script.id,
+                          sourceScriptTitle: script.title,
+                        });
+                        showToast(res.added ? '已保存到素材库' : '该素材已在素材库中（已更新）');
+                      }}
+                        onRegenerate={() => {
+                          setRegenerateElementItem({ type: 'props', index: i, name: prop.name, description: prop.description, prompt: prop.prompt });
+                          setRegenerateElementReq('');
+                          setRegenerateElementError(null);
                         }}
+                        regenerating={regeneratingElementKey === `props_${i}`}
                       />
                     </div>
                   ))}
@@ -3202,11 +3324,12 @@ export function Detail() {
                                         <button
                                           type="button"
                                           onClick={() => { setAddShotText(''); setAddShotAfterIndex(originalIndex); }}
-                                          className="w-full flex items-center justify-center space-x-1 text-[10px] font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-dashed border-indigo-200 hover:border-indigo-400 px-3 py-2 rounded-lg transition-all cursor-pointer mt-auto"
-                                          title="在当前分镜后用 AI 续写下一个分镜"
+                                          disabled={addingShotIndex === originalIndex}
+                                          className="w-full flex items-center justify-center space-x-1 text-[10px] font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-dashed border-indigo-200 hover:border-indigo-400 px-3 py-2 rounded-lg transition-all cursor-pointer mt-auto disabled:opacity-50 disabled:cursor-not-allowed"
+                                          title={addingShotIndex === originalIndex ? 'AI 生成中...' : '在当前分镜后用 AI 续写下一个分镜'}
                                         >
-                                          <Plus className="w-3 h-3" />
-                                          <span>新增下一分镜</span>
+                                          {addingShotIndex === originalIndex ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                                          <span>{addingShotIndex === originalIndex ? '生成中' : '新增下一分镜'}</span>
                                         </button>
                                       )}
                                       </div>
@@ -3970,6 +4093,115 @@ export function Detail() {
         </div>
       )}
 
+      {/* 重写素材（角色/场景/道具）提示词弹窗 */}
+      {regenerateElementItem !== null && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white border border-neutral-200 rounded-2xl w-full max-w-2xl shadow-2xl animate-in zoom-in-95 duration-200 overflow-hidden flex flex-col max-h-[90vh]">
+            {/* Fixed Header */}
+            <div className="p-6 pb-4 border-b border-neutral-100 shrink-0">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold text-neutral-900 flex items-center space-x-2">
+                  <Sparkles className="w-5 h-5 text-indigo-600" />
+                  <span>重写素材提示词</span>
+                </h3>
+                <button
+                  onClick={() => setRegenerateElementItem(null)}
+                  disabled={regeneratingElementKey !== null}
+                  className="text-neutral-400 hover:text-neutral-600 p-1 rounded-lg transition-colors disabled:opacity-40"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <p className="text-sm text-neutral-500 mt-1">
+                <span className="font-semibold text-neutral-800">{regenerateElementItem.name}</span> — 需求为可选项，不填则直接按原设定重写
+              </p>
+            </div>
+
+            {/* Scrollable Content */}
+            <div className="p-6 pt-4 space-y-4 overflow-y-auto flex-1">
+              {regenerateElementError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg p-3">{regenerateElementError}</div>
+              )}
+
+              {/* 旧提示词（只读参考） */}
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-wider mb-1.5">当前提示词（参考）</label>
+                <div className="w-full text-xs font-mono text-neutral-600 bg-neutral-100 border border-neutral-200 rounded-xl p-3 max-h-[160px] overflow-y-auto leading-relaxed whitespace-pre-wrap">
+                  {regenerateElementItem.prompt || '（空）'}
+                </div>
+              </div>
+
+              {/* 修改需求输入 */}
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-wider mb-1.5">修改需求 <span className="text-neutral-400 font-normal normal-case">（可选）</span></label>
+                <textarea
+                  value={regenerateElementReq}
+                  onChange={(e) => setRegenerateElementReq(e.target.value)}
+                  rows={5}
+                  placeholder="例如：更阴郁的光影、改为黄金时刻逆光、增加战损细节、换个发型……"
+                  className="w-full text-sm bg-white border border-neutral-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 resize-none"
+                />
+              </div>
+
+              {/* AI 模型选择 */}
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-wider mb-1.5">AI 模型</label>
+                <select
+                  value={createEpProvider}
+                  onChange={(e) => { setCreateEpProvider(e.target.value as any); localStorage.setItem('create_provider', e.target.value); }}
+                  disabled={regeneratingElementKey !== null}
+                  className="w-full text-sm rounded-lg border border-neutral-300 p-2 bg-white font-medium text-neutral-800 shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="deepseek">DeepSeek（文本逻辑强）</option>
+                  <option value="doubao">火山豆包（故事本地化佳）</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Fixed Footer */}
+            <div className="p-6 pt-4 border-t border-neutral-100 shrink-0">
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setRegenerateElementItem(null)}
+                  disabled={regeneratingElementKey !== null}
+                  className="px-4 py-2 text-sm font-medium text-neutral-600 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors disabled:opacity-40"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => {
+                    if (!regenerateElementItem) return;
+                    setRegenerateElementError(null);
+                    const key = `${regenerateElementItem.type}_${regenerateElementItem.index}`;
+                    setRegenerateElementItem(null);
+                    setRegeneratingElementKey(key);
+                    handleRegenerateElementPrompt(
+                      regenerateElementItem.type,
+                      regenerateElementItem.index,
+                      regenerateElementItem.name,
+                      regenerateElementItem.description,
+                      regenerateElementItem.prompt,
+                      regenerateElementReq
+                    ).catch(() => {}).finally(() => {
+                      setRegeneratingElementKey(null);
+                    });
+                  }}
+                  disabled={regeneratingElementKey !== null}
+                  className="px-5 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-sm disabled:opacity-40 disabled:cursor-not-allowed flex items-center space-x-2"
+                >
+                  {regeneratingElementKey !== null ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /><span>AI 生成中...</span></>
+                  ) : (
+                    <Sparkles className="w-4 h-4" />
+                  )}
+                  <span>{regeneratingElementKey !== null ? '' : 'AI 重新生成'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 删除分镜确认弹窗 */}
       {deletingShotIndex !== null && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
@@ -4081,17 +4313,17 @@ export function Detail() {
       )}
 
       {/* 重新生成集数弹窗 */}
-      {regeneratingEpIndex !== null && (
+      {regenerateEpModalIndex !== null && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in duration-200">
           <div className="bg-white border border-neutral-200 rounded-2xl p-6 w-full max-w-lg shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-200">
             {/* Modal Header */}
             <div className="flex items-center justify-between pb-3 border-b border-neutral-100 mb-4">
               <h3 className="text-lg font-bold text-neutral-900 flex items-center space-x-2">
                 <Sparkles className="w-5 h-5 text-indigo-600" />
-                <span>AI 重新生成第 {regeneratingEpIndex + 1} 集</span>
+                <span>AI 重新生成第 {regenerateEpModalIndex + 1} 集</span>
               </h3>
               <button 
-                onClick={() => !isRegeneratingEpisode && setRegeneratingEpIndex(null)}
+                onClick={() => !isRegeneratingEpisode && setRegenerateEpModalIndex(null)}
                 className="text-neutral-400 hover:text-neutral-600 rounded-lg p-1 hover:bg-neutral-100 disabled:opacity-50"
                 disabled={isRegeneratingEpisode}
               >
@@ -4102,7 +4334,7 @@ export function Detail() {
             {/* Modal Body */}
             <div className="space-y-4 overflow-y-auto pr-1 flex-1">
               <p className="text-xs text-neutral-500 leading-relaxed bg-neutral-50 border border-neutral-100 p-3 rounded-lg">
-                重新生成这一集时，AI 将根据该集之前的剧情，以及您在下方输入的新要求，重新撰写第 {regeneratingEpIndex + 1} 集的故事大纲，并全自动为您更新/替换对应的视频分镜头脚本。
+                重新生成这一集时，AI 将根据该集之前的剧情，以及您在下方输入的新要求，重新撰写第 {regenerateEpModalIndex + 1} 集的故事大纲，并全自动为您更新/替换对应的视频分镜头脚本。
               </p>
 
               <div>
@@ -4148,7 +4380,7 @@ export function Detail() {
             {/* Modal Footer */}
             <div className="flex space-x-3 justify-end mt-6 pt-4 border-t border-neutral-100">
               <button 
-                onClick={() => setRegeneratingEpIndex(null)}
+                onClick={() => setRegenerateEpModalIndex(null)}
                 className="px-4 py-2 text-sm font-medium text-neutral-600 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors disabled:opacity-50"
                 disabled={isRegeneratingEpisode}
               >
@@ -4249,7 +4481,7 @@ export function Detail() {
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-bold text-neutral-500 uppercase tracking-wider block">
-                    生成提示词 (Prompt)
+                    生成提示词
                   </label>
                   
                   {/* Small, inconspicuous regenerate button on the far right of the prompt header */}

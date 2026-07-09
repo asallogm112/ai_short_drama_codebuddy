@@ -1,5 +1,5 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { Clapperboard, PlusCircle, LayoutGrid } from 'lucide-react';
+import { Clapperboard, PlusCircle, LayoutGrid, Library } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 export function Layout() {
@@ -15,6 +15,18 @@ export function Layout() {
           </Link>
           
           <nav className="flex space-x-1">
+            <Link 
+              to="/materials" 
+              className={cn(
+                "px-3 py-2 rounded-md text-sm font-medium transition-colors flex items-center space-x-2",
+                location.pathname === '/materials' 
+                  ? "bg-neutral-100 text-neutral-900" 
+                  : "text-neutral-500 hover:bg-neutral-100/50 hover:text-neutral-900"
+              )}
+            >
+              <Library className="w-4 h-4" />
+              <span className="hidden sm:inline">素材库</span>
+            </Link>
             <Link 
               to="/" 
               className={cn(

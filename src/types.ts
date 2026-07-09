@@ -50,3 +50,16 @@ export interface SavedScript extends ScriptData {
   createdAt: number;
   originalPrompt?: string;
 }
+
+// 全局「素材库」：跨剧本保存的素材（角色/场景/道具）图片与提示词
+export interface LibraryMaterial {
+  id: string;
+  type: 'characters' | 'scenes' | 'props';
+  name: string;
+  description: string;
+  prompt: string;
+  imageUrl?: string;
+  sourceScriptId?: string;
+  sourceScriptTitle?: string;
+  createdAt: number;
+}

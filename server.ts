@@ -58,6 +58,21 @@ function safeParseJson(text: string): any {
   }
 }
 
+// 统一去重「图片比例」片段：模型可能把结尾格式重复多遍（图片比例 : ，图片比例 : ，图片比例 : 16:9），
+// 这里移除所有片段，仅保留一个规范比例（优先用模型给出的非空值，否则用 defaultRatio）。
+// 同时兼容全角/半角冒号(：:)与逗号(，,)。
+function cleanImageRatio(text: string, defaultRatio: string = '16:9'): string {
+  if (!text) return text;
+  const ratioRe = /图片比例\s*[:：]\s*([^，。,]*)[，,]?/g;
+  const matches = [...text.matchAll(ratioRe)];
+  let val = defaultRatio;
+  for (const m of matches) {
+    const v = (m[1] || '').trim();
+    if (v) { val = v; break; }
+  }
+  return text.replace(ratioRe, '').trim() + '，图片比例 : ' + val;
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -105,6 +120,7 @@ async function startServer() {
 【核心素材提炼与一致性控制规则 - 极为重要！】：
 1. 只有在整个短剧中「多次、重复出现」需要保持视觉一致性的场景、道具，或者是对剧情起决定性作用的核心背景、核心道具，才需要提炼到 elements.scenes 或 elements.props 中，并为其生成专门的素材设定图/提示词。
 2. 凡是「只出现一次」的、普通的或过渡性的场景和道具（例如只在一个镜头里作为背景的路边摊、只拿了一下就没下文的杯子等），绝对不要提炼，直接在分镜头的 prompt 中用具体的文字来详细描述即可，以防冗余素材污染！
+3. 每个素材的 prompt 必须「简洁」：只写生成参考图真正需要的信息（角色=外貌+服装；场景=环境构造+光影；道具=材质+形态），严禁堆砌冗长形容词、动作叙事，以及与视频无关的姿势/场景描写（例如不要写"坐在驾驶座上握方向盘"这类只属于某一帧的动作）。
 
 你必须 100% 严格以如下的 JSON 格式返回。不要包含任何 markdown 包裹，不要有任何额外的文字 or 解释：
 {
@@ -116,21 +132,21 @@ async function startServer() {
       {
         "name": "角色名字 (必须以 R1_、R2_ 等作为前缀，例如 R1_林薇)",
         "description": "角色背景、性格和外貌描述",
-        "prompt": "用于生成该角色的提示词。必须以该角色名字开头，格式严格为：'角色名字  :  [详细的外貌与服装描述]，图片比例 : 16:9，只生成 1 张图片 , 如果 生成过 , 就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !'"
+        "prompt": "用于生成该角色的提示词。必须以该角色名字开头，只简洁描写外貌与服装，不要加任何动作、姿势或场景叙事，格式为：'角色名字  :  [简洁的外貌与服装描述]，全身像，纯色背景，图片比例 : 16:9，只生成 1 张图片'"
       }
     ],
     "scenes": [ // 在这里提炼核心或重复出现的场景
       {
         "name": "场景名称 (必须以 S1_、S2_ 等作为前缀，例如 S1_深夜荒河滩)",
         "description": "场景的详细细节和氛围",
-        "prompt": "用于生成场景背景的提示词。必须以该场景名字开头，格式严格为：'场景名称  :  [详细的背景和灯光描述]，图片比例 : 16:9，只生成 1 张图片 , 如果 生成过 , 就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !'"
+        "prompt": "用于生成场景背景的提示词。必须以该场景名字开头，只简洁描写环境构造与光影氛围，格式为：'场景名称  :  [简洁的背景和灯光描述]，图片比例 : 16:9，只生成 1 张图片'"
       }
     ],
     "props": [ // 在这里提炼核心或重复出现的道具
       {
         "name": "道具名称 (必须以 P1_、P2_ 等作为前缀，例如 P1_灰布)",
         "description": "道具的详细细节",
-        "prompt": "用于生成该道具的提示词。必须以该道具名字开头，格式严格为：'道具名称  :  [详细的材质和形态描述]，图片比例 : 16:9，只生成 1 张图片 , 如果 生成过 , 就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !'"
+        "prompt": "用于生成该道具的提示词。必须以该道具名字开头，只简洁描写外观材质与形态，格式为：'道具名称  :  [简洁的材质和形态描述]，图片比例 : 16:9，只生成 1 张图片'"
       }
     ]
   },
@@ -301,8 +317,8 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
         cleanPrompt = cleanPrompt.replace(genericPrefixRegex, '');
 
         if (type === 'characters') {
-          const targetKeywords = "全身像，角色三视图设定图，纯色背景";
-          if (!cleanPrompt.includes("全身像") || !cleanPrompt.includes("角色三视图") || !cleanPrompt.includes("纯色背景")) {
+          const targetKeywords = "全身像，纯色背景";
+          if (!cleanPrompt.includes("全身像") || !cleanPrompt.includes("纯色背景")) {
             cleanPrompt = `${targetKeywords}，${cleanPrompt}`;
           }
           cleanPrompt = cleanPrompt.replace(/比例\s*为?\s*3\s*:\s*1/gi, '');
@@ -316,7 +332,7 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
         cleanPrompt = cleanPrompt.replace(suffixPattern, '');
         cleanPrompt = cleanPrompt.replace(/[，,、]?\s*切记\s*切记\s*,\s*因为要\s*保证\s*一致性\s*!/gi, '');
         cleanPrompt = cleanPrompt.trim().replace(/[，。,\.\s]+$/, '');
-        cleanPrompt = `${cleanPrompt}，只生成 1 张图片 , 如果 生成过 , 就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !`;
+        cleanPrompt = `${cleanPrompt}，只生成 1 张图片`;
 
         return `${cleanName}  :  ${cleanPrompt.trim()}`;
       };
@@ -356,19 +372,19 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
           if (parsedData.elements.characters && Array.isArray(parsedData.elements.characters)) {
             parsedData.elements.characters = parsedData.elements.characters.map((char: any) => ({
               ...char,
-              prompt: enforcePrefix(char.name, char.prompt, 'characters')
+              prompt: cleanImageRatio(enforcePrefix(char.name, char.prompt, 'characters'))
             }));
           }
           if (parsedData.elements.scenes && Array.isArray(parsedData.elements.scenes)) {
             parsedData.elements.scenes = parsedData.elements.scenes.map((scene: any) => ({
               ...scene,
-              prompt: enforcePrefix(scene.name, scene.prompt, 'scenes')
+              prompt: cleanImageRatio(enforcePrefix(scene.name, scene.prompt, 'scenes'))
             }));
           }
           if (parsedData.elements.props && Array.isArray(parsedData.elements.props)) {
             parsedData.elements.props = parsedData.elements.props.map((prop: any) => ({
               ...prop,
-              prompt: enforcePrefix(prop.name, prop.prompt, 'props')
+              prompt: cleanImageRatio(enforcePrefix(prop.name, prop.prompt, 'props'))
             }));
           }
         }
@@ -530,8 +546,8 @@ ${existingStory}
         cleanPrompt = cleanPrompt.replace(genericPrefixRegex, '');
 
         if (type === 'characters') {
-          const targetKeywords = "全身像，角色三视图设定图，纯色背景";
-          if (!cleanPrompt.includes("全身像") || !cleanPrompt.includes("角色三视图") || !cleanPrompt.includes("纯色背景")) {
+          const targetKeywords = "全身像，纯色背景";
+          if (!cleanPrompt.includes("全身像") || !cleanPrompt.includes("纯色背景")) {
             cleanPrompt = `${targetKeywords}，${cleanPrompt}`;
           }
           cleanPrompt = cleanPrompt.replace(/比例\s*为?\s*3\s*:\s*1/gi, '');
@@ -545,7 +561,7 @@ ${existingStory}
         cleanPrompt = cleanPrompt.replace(suffixPattern, '');
         cleanPrompt = cleanPrompt.replace(/[，,、]?\s*切记\s*切记\s*,\s*因为要\s*保证\s*一致性\s*!/gi, '');
         cleanPrompt = cleanPrompt.trim().replace(/[，。,\.\s]+$/, '');
-        cleanPrompt = `${cleanPrompt}，只生成 1 张图片 , 如果 生成过 , 就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !`;
+        cleanPrompt = `${cleanPrompt}，只生成 1 张图片`;
 
         return `${cleanName}  :  ${cleanPrompt.trim()}`;
       };
@@ -620,7 +636,7 @@ ${existingStory}
         if (scns && Array.isArray(scns)) {
           parsedData.newElements.scenes = scns.map((scene: any) => ({
             ...scene,
-            prompt: enforcePrefix(scene.name, scene.prompt, 'scenes')
+            prompt: cleanImageRatio(enforcePrefix(scene.name, scene.prompt, 'scenes'))
           }));
         }
         if (prps && Array.isArray(prps)) {
@@ -670,7 +686,7 @@ ${existingStory}
 2. 保持与分镜头的角色、场景、道具设定 100% 视觉一致。因此，凡是涉及到角色（如 @R1_林薇）、场景（如 @S1_古旧茶馆）、道具（如 @P1_白色纸条）等元素，你必须在提示词中 100% 保留其完整的带 @ 的名称格式。
 3. 提示词必须详细描写该瞬间的静态特征：包括特定的姿势、具体面部表情、眼神聚焦、手部动作、那一瞬间的光线投影方向、空气中飘浮的微尘状态、以及写实、电影级体积光、35毫米镜头、胶片颗粒感、冷色调等高画质画面质感和相机参数描述。
 4. 返回格式必须是：'[纯中文核心视觉画面与高画质细节描述]'。绝对禁止包含任何英文！
-5. 在末尾自动包含 "，图片比例 : 16:9，只生成 1 张图片 , 如果 生成过 , 就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !"。
+5. 在末尾自动包含 "，图片比例 : 16:9，只生成 1 张图片"。
 `;
 
       let resultText = "";
@@ -743,14 +759,14 @@ ${videoPrompt || "无"}
 2. 数量：生成 1 到 4 个关键帧提示词（不要强行拼凑 4 个，必须根据视频提示词的实际结构，有几个明显的节点或时间段就提取几个，最多不超过4个）。
 3. 视觉一致性：保持与原提示词的角色、场景、道具设定 100% 视觉一致。因此，凡是涉及到角色（如 @R1_谢老太）、场景（如 @S1_深夜荒河滩）、道具（如 @P2_xxx）等元素，你必须在生成的关键帧提示词中 100% 保留其完整的带 @ 的名称格式。
 4. 内容与返回格式要求：必须 100% 使用纯简体中文描述，绝对禁止夹杂或生成英文段落/英文绘画提示词！每个关键帧提示词必须按照：'【时间段】[纯中文核心视觉画面与高画质细节、机位、电影光影、相机参数与胶片质感描述]' 格式进行设计，以便 AI 绘图模型能够完美生成。
-5. 尾缀适配：为了适配系统格式，在每个生成的提示词文本末尾自动包含："，图片比例 : 16:9，只生成 1 张图片 , 如果 生成过 ,就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !"。
+5. 尾缀适配：为了适配系统格式，在每个生成的提示词文本末尾自动包含："，图片比例 : 16:9，只生成 1 张图片"。
 6. 返回格式：你必须返回一个合法的 JSON 数组，数组中包含 1 到 4 个字符串元素，每个元素对应一个提取生成的关键帧提示词。
 请直接返回 JSON 数组，不要包含任何 \`\`\`json 或 \`\`\` 标记，不要有任何 Markdown 包裹，不要有任何多余的汉字解释 or 说明。
 
 示例返回格式：
 [
-  "【00:00-00:03】特写，@R1_谢老太 枯皱的手紧紧攥着洗衣服的灰布，指节发力凸显拉紧，水花从指缝间飞溅，冷色调，胶片颗粒质感，电影级微距，极高画质。，图片比例 : 16:9，只生成 1 张图片 , 如果 生成过 , 就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !",
-  "【00:03-00:06】中景，@R1_谢老太 弓背站在 @S1_深夜荒河滩 上，神情凝重地望着平静的河面，月光冷清，薄雾缭绕，电影级体积光，写实，35毫米镜头。，图片比例 : 16:9，只生成 1 张图片 , 如果 生成过 , 就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !"
+  "【00:00-00:03】特写，@R1_谢老太 枯皱的手紧紧攥着洗衣服的灰布，指节发力凸显拉紧，水花从指缝间飞溅，冷色调，胶片颗粒质感，电影级微距，极高画质。，图片比例 : 16:9，只生成 1 张图片",
+  "【00:03-00:06】中景，@R1_谢老太 弓背站在 @S1_深夜荒河滩 上，神情凝重地望着平静的河面，月光冷清，薄雾缭绕，电影级体积光，写实，35毫米镜头。，图片比例 : 16:9，只生成 1 张图片"
 ]
 `;
 
@@ -819,7 +835,7 @@ ${videoPrompt || "无"}
   // Prompt Regeneration Endpoint
   app.post("/api/regenerate-prompt", async (req, res) => {
     try {
-      const { type, name, description, currentPrompt, shotContext, provider = 'deepseek' } = req.body;
+      const { type, name, description, currentPrompt, shotContext, provider = 'deepseek', userRequirements = '' } = req.body;
       
       let systemInstruction = "";
       let userPrompt = "";
@@ -833,13 +849,13 @@ ${videoPrompt || "无"}
 当前旧的提示词 (参考使用): ${currentPrompt || "无"}
 
 【生成要求】：
-1. 重新生成一个崭新、更具电影感和丰富细节的提示词。
+1. 重新生成一个简洁、精准的提示词，只描写「生成该素材参考图」真正需要的信息（角色=外貌+服装；场景=环境构造+光影；道具=材质+形态）。严禁冗长形容词、动作叙事，以及与视频无关的姿势/场景描写（例如不要写"坐在驾驶座上握方向盘"这类只属于某一帧的动作）。
 2. 必须以该素材名称（例如：${name || 'R1_角色'}）开头，后面跟着两个空格、一个冒号、两个空格，然后是具体的提示词。
-   - 如果是角色，格式必须严格以：'${name || 'R1_角色'}  :  全身像，角色三视图设定图，纯色背景，[具体描述]，图片比例 : 16:9，只生成 1 张图片 , 如果 生成过 , 就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !' 的形式结尾。
-   - 如果是场景或道具，格式必须严格以：'${name || 'S1_场景'}  :  [具体描述]，图片比例 : 16:9，只生成 1 张图片 , 如果 生成过 , 就不要再生成了 . 切记 切记 , 因为要 保证 一致性  !' 的形式结尾。
-3. 提示词必须详细描写该角色的长相、衣着或者场景的具体构造、材质、光影氛围，必须使用简体中文。
+   - 如果是角色，格式必须严格以：'${name || 'R1_角色'}  :  全身像，纯色背景，[简洁的外貌与服装描述]，图片比例 : 16:9，只生成 1 张图片' 的形式结尾。
+   - 如果是场景或道具，格式必须严格以：'${name || 'S1_场景'}  :  [简洁的描述]，图片比例 : 16:9，只生成 1 张图片' 的形式结尾。
+3. 提示词必须用简体中文描写该角色的长相、衣着或者场景的具体构造、材质、光影氛围，保持精炼。
 4. 返回的内容必须直接是生成结果，不要有任何多余的话或 markdown 块引用包围。
-`;
+${userRequirements ? `\n【用户额外需求（务必重点满足）】：\n${userRequirements}\n` : ''}`;
       } else if (type === 'shot') {
         systemInstruction = "你是一位顶级的电影导演和视频提示词专家。你的任务是为分镜头重新生成一个极致丰富、电影级、可直接交给 视频大模型的高水准【单镜头一镜到底】纯中文视频生成提示词。\n【音效规范】：音效应按时间段分段嵌入提示词中（如“0-2秒 音效：环境音”），禁止在末尾用独立的「音效/背景音乐」段落或区块汇总。";
         userPrompt = `
@@ -929,6 +945,8 @@ ${videoPrompt || "无"}
       }
       
       resultText = resultText.replace(/^\s*```[a-zA-Z]*/m, "").replace(/```\s*$/m, "").trim();
+      // 去重「图片比例」片段（兼容全角/半角冒号与逗号，仅保留一个规范比例）
+      resultText = cleanImageRatio(resultText);
       // 后置清洗：删尾巴块 + 删音效前时间前缀（支持相对时间 0-3秒 和 绝对时间 00:00 - 00:03）
       resultText = resultText
         .replace(/\[音效\s*\/\s*背景音乐[^\]]*\]/g, '')
@@ -964,6 +982,83 @@ ${videoPrompt || "无"}
     } catch (e: any) {
       console.error("Export error:", e);
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 智能导入素材：将任意文本解析为结构化素材（角色/场景/道具）
+  app.post("/api/parse-elements", async (req, res) => {
+    try {
+      const { text, provider = 'deepseek' } = req.body;
+      if (!text || !text.trim()) {
+        return res.status(400).json({ error: "缺少待解析文本" });
+      }
+      const promptText = `
+你是一个专业的影视素材解析助手。用户会给你一段关于短剧素材的文字（可能是自然语言描述、列表、或半结构化文本），你需要从中智能识别出三类素材，并提取成结构化数据。
+
+【素材类别】
+- 角色（characters）：有名字的人物、拟人化角色等
+- 场景（scenes）：故事发生的地点、环境
+- 道具（props）：关键物品、器物
+
+【提取规则】
+1. 智能判断每个素材属于哪一类，不要漏掉文本中明确出现的素材。
+2. 为每个素材生成一个简洁的「名称」(name)：
+   - 角色名称格式：R1_简短名称、R2_简短名称……（按顺序编号，如 R1_林晚）
+   - 场景名称格式：S1_简短名称、S2_简短名称……
+   - 道具名称格式：P1_简短名称、P2_简短名称……
+   - 名称要简短、能代表该素材，用中文或中英组合均可，但不要带空格。
+3. 为每个素材生成一段「简洁」的「提示词」(prompt)：纯中文的视觉描述，只写生成参考图真正需要的信息（角色=外貌+服装；场景=环境构造+光影；道具=材质+形态），可直接用于 AI 绘图。严禁堆砌冗长形容词，严禁加入动作叙事或与视频无关的姿势/场景描写。
+4. 如果用户原文已经带有可用的视觉描述，请提炼优化后填入 prompt；如果没有，请基于常识合理补全。
+
+【返回格式】
+只返回一个合法的 JSON 对象（不要任何 Markdown 代码块、不要多余解释），结构如下：
+{
+  "characters": [ { "name": "R1_林晚", "prompt": "黑长直发，苍白面容……" } ],
+  "scenes": [ { "name": "S1_古井村老宅", "prompt": "老旧木结构……" } ],
+  "props": [ { "name": "P1_银锁", "prompt": "古朴银色长命锁……" } ]
+}
+若某一类没有素材，返回空数组。
+`;
+
+      let resultText = "";
+      const messages = [{ role: "user", content: promptText + "\n\n【用户原文】\n" + text }];
+
+      if (provider === "deepseek") {
+        if (!process.env.DEEPSEEK_API_KEY) throw new Error("DEEPSEEK_API_KEY is not configured on the server.");
+        const response = await fetch("https://api.deepseek.com/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}` },
+          body: JSON.stringify({ model: "deepseek-chat", messages, temperature: 0.4 })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
+        resultText = data.choices[0].message.content;
+      } else if (provider === "doubao") {
+        if (!process.env.DOUBAO_API_KEY || !process.env.DOUBAO_MODEL_ENDPOINT) throw new Error("DOUBAO_API_KEY or DOUBAO_MODEL_ENDPOINT is not configured on the server.");
+        const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.DOUBAO_API_KEY}` },
+          body: JSON.stringify({ model: process.env.DOUBAO_MODEL_ENDPOINT, messages, temperature: 0.4 })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error?.message || "Doubao API error");
+        resultText = data.choices[0].message.content;
+      } else {
+        throw new Error("Invalid provider selected");
+      }
+
+      resultText = resultText.replace(/^\s*```[a-zA-Z]*/m, "").replace(/```\s*$/m, "").trim();
+      const parsed = safeParseJson(resultText);
+      if (!parsed || typeof parsed !== 'object') throw new Error("模型返回无法解析为素材结构");
+      const result = {
+        characters: Array.isArray(parsed.characters) ? parsed.characters : [],
+        scenes: Array.isArray(parsed.scenes) ? parsed.scenes : [],
+        props: Array.isArray(parsed.props) ? parsed.props : [],
+      };
+      res.json(result);
+    } catch (error: any) {
+      console.error("Parse Elements API Error:", error);
+      res.status(500).json({ error: error.message || "Failed to parse elements" });
     }
   });
 
