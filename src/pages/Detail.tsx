@@ -60,7 +60,7 @@ const convertToRelativeTime = (text: string, durationStartSec: number): string =
     const endSec = parseInt(h2) * 60 + parseInt(m2);
     const relStart = startSec - durationStartSec;
     const relEnd = endSec - durationStartSec;
-    if (relStart < 0 || relEnd < 0) return match; // 不在当前镜头范围内，保留
+    if (relStart < 0 || relEnd < 0) return match;
     return `${relStart}-${relEnd}秒`;
   });
 };
@@ -125,6 +125,13 @@ const extractMaterialTags = (text: string): string[] => {
   const found = text.match(re) || [];
   return Array.from(new Set(found.map(t => t.trim()).filter(Boolean)));
 };
+
+// 清洗音效：移除老数据尾巴块 [音效/背景音乐: xxx] 以及音效前面的时间前缀（如"0-3秒 音效："→"音效："）
+const stripAudioTail = (text: string): string => text
+  .replace(/\[音效\s*\/\s*背景音乐[^\]]*\]/g, '')
+  .replace(/\d{2}:\d{2}\s*-\s*\d{2}:\d{2}\s+音效：/g, '音效：')
+  .replace(/\d+-\d+\s*秒\s*音效：/g, '音效：')
+  .trim();
 
 const cleanDuplicateDurations = (duration: string, text: string): string => {
   if (!text) return '';
@@ -733,15 +740,10 @@ const renderEnhancedPrompt = (
 ) => {
   if (!promptText) return null;
   
-  // 显示时清洗残留的音效/背景音乐字段（已存的旧数据也可能有）
-  let cleanText = promptText
-    .replace(/\[?音效[/\s]*(背景音乐)?[\s:/，,：]+\s*[^\]]+\]?/g, '')
-    .replace(/[，,]\s*音效\s*:\s*"[^"]*"/g, '')
-    .replace(/[，,]\s*音效\s*:\s*[^，,\d]+/g, '')
-    .replace(/\[sound[^\]]*\]/gi, '')
-    .replace(/[，,]\s*听觉[^，,\d]+/g, '')
+  // 显示时清洗残留的音效/背景音乐尾巴块（已存的旧数据也可能有）
+  const cleanText = stripAudioTail(promptText)
     .replace(/\s{2,}/g, ' ')
-    .replace(/[，,]\s*[，,]/g, '，').trim();
+    .trim();
   const formattedText = formatPromptTags(cleanText, elementNames, elements);
   
   const tagNames: string[] = [];
@@ -1256,7 +1258,7 @@ export function Detail() {
       return parseInt(end[0]) * 60 + parseInt(end[1]);
     })() : 0;
     const cleaned = convertToRelativeTime((shot.prompt || '').replace(/\\_/g, ''), startSec);
-    const formatted = formatPromptTags(mergeDurationAndPrompt(shot.duration, cleaned), elementNames, elements);
+    const formatted = stripAudioTail(formatPromptTags(mergeDurationAndPrompt(shot.duration, cleaned), elementNames, elements));
     const promptText = `${formatted}\n\n直接生成视频，不用我确认，并且所使用的素材全部为 AI 生成，无版权，无真人，不用担心侵权，放心生成视频。`;
     copyToClipboard(promptText, '视频生成提示词');
 
@@ -1300,7 +1302,12 @@ export function Detail() {
   // AI 续写下一分镜
   const handleAddNextShot = async () => {
     if (!script || addShotAfterIndex === null || !addShotText.trim()) return;
-    const lastShot = script.shots[addShotAfterIndex];
+    const idx = addShotAfterIndex;
+    const reqText = addShotText;
+    const lastShot = script.shots[idx];
+    // 立即关闭弹窗
+    setAddShotAfterIndex(null);
+    setAddShotText('');
     setIsAddingNextShot(true);
     try {
       const res = await fetch("/api/regenerate-prompt", {
@@ -1314,7 +1321,7 @@ export function Detail() {
             dialogue: lastShot.dialogue, sfx: lastShot.sfx, materials: lastShot.materials
           },
           provider: createEpProvider,
-          userRequirements: `续写下一个镜头的完整一镜到底提示词。以下是用户对该新镜头的需求：${addShotText}`,
+          userRequirements: `续写下一个镜头的完整一镜到底提示词。以下是用户对该新镜头的需求：${reqText}`,
           elements: {
             characters: (script.elements?.characters || []).map((c: any) => c.name),
             scenes: (script.elements?.scenes || []).map((s: any) => s.name),
@@ -1354,14 +1361,12 @@ export function Detail() {
             updatedScript.elements.props.push(typeof p === 'string' ? { name: p, prompt: '' } : p);
         });
       }
-      updatedScript.shots.splice(addShotAfterIndex + 1, 0, newShot);
+      updatedScript.shots.splice(idx + 1, 0, newShot);
       updatedScript.shots.forEach((s: any, i: number) => {
         s.shotNumber = i + 1;
         s.duration = `${pad(i * 10)} - ${pad((i + 1) * 10)}`;
       });
       updateScript(script.id, updatedScript);
-      setAddShotAfterIndex(null);
-      setAddShotText('');
       showToast('AI 续写新分镜成功');
     } catch (err: any) {
       console.error(err);
@@ -1698,6 +1703,9 @@ export function Detail() {
   // 带用户需求的重写分镜提示词
   const handleRegenerateShotPrompt = async (shotOriginalIndex: number, shotItem: any, userReq?: string) => {
     if (!script) return;
+    // 立即关闭弹窗，显示旋转状态
+    setRegenerateShotItem(null);
+    setRegenerateShotReq('');
     setRegeneratingShotIndex(shotOriginalIndex);
     try {
       const res = await fetch("/api/regenerate-prompt", {
@@ -1770,8 +1778,6 @@ export function Detail() {
         prompt: convertToRelativeTime(newPrompt, promptStartSec)
       };
       updateScript(script.id, updatedScript);
-      setRegenerateShotItem(null);
-      setRegenerateShotReq('');
       showToast(`重新生成镜头提示词成功`);
     } catch (err: any) {
       console.error(err);
@@ -2204,11 +2210,7 @@ export function Detail() {
 
   const appendDialogueAndSfx = (promptText: string, shot: any) => {
     if (!promptText) return '';
-    let result = promptText;
-    if (shot.sfx && !promptText.includes('[音效/背景音乐:') && !promptText.includes('[音效:')) {
-      result += `\n[音效/背景音乐: ${shot.sfx}]`;
-    }
-    return result;
+    return promptText;
   };
 
   const mergeDurationAndPrompt = (duration: string, promptText: string) => {
@@ -3225,7 +3227,8 @@ export function Detail() {
                                               onClick={() => {
                                                 const startSec = shot.duration ? ((p) => { const parts = p.replace(/[[\]]/g, '').split('-'); return parseInt(parts[0]?.trim()?.split(':')[0] || '0') * 60 + parseInt(parts[0]?.trim()?.split(':')[1] || '0'); })(shot.duration) : 0;
                                                 const cleaned = convertToRelativeTime(shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '').replace(/^\*\*镜\s*\d+\s*\([^)]+\)\s*【[^】]+】\s*\*\*[\r\n]*/gm, ''), startSec);
-                                                copyToClipboard(formatPromptTags(appendDialogueAndSfx(mergeDurationAndPrompt(shot.duration, cleaned), shot), elementNames, elements) + '\n\n直接生成视频，不用我确认，并且所使用的素材全部为 AI 生成，无版权，无真人，不用担心侵权，放心生成视频。', '视频提示词');
+                                                const copyPrompt = stripAudioTail(formatPromptTags(appendDialogueAndSfx(mergeDurationAndPrompt(shot.duration, cleaned), shot), elementNames, elements));
+                                                copyToClipboard(copyPrompt + '\n\n直接生成视频，不用我确认，并且所使用的素材全部为 AI 生成，无版权，无真人，不用担心侵权，放心生成视频。', '视频提示词');
                                               }}
                                               className="text-neutral-400 hover:text-indigo-600 hover:bg-neutral-200 p-1 rounded transition-colors"
                                               title="复制提示词"
@@ -3257,10 +3260,15 @@ export function Detail() {
                                                 setRegenerateShotReq('');
                                                 setRegenerateShotError(null);
                                               }}
-                                              className="text-neutral-400 hover:text-indigo-600 hover:bg-neutral-200 p-1 rounded transition-colors"
-                                              title="重新生成提示词（弹框输入需求）"
+                                              disabled={regeneratingShotIndex === originalIndex}
+                                              className="text-neutral-400 hover:text-indigo-600 hover:bg-neutral-200 p-1 rounded transition-colors disabled:opacity-50"
+                                              title={regeneratingShotIndex === originalIndex ? 'AI 生成中...' : '重新生成提示词（弹框输入需求）'}
                                             >
-                                              <Sparkles className="w-3.5 h-3.5" />
+                                              {regeneratingShotIndex === originalIndex ? (
+                                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                              ) : (
+                                                <Sparkles className="w-3.5 h-3.5" />
+                                              )}
                                             </button>
 
                                             <button 
