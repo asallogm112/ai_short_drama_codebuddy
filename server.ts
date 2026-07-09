@@ -7,7 +7,15 @@ import "dotenv/config";
 import multer from "multer";
 import JSON5 from "json5";
 
-const upload = multer({ dest: 'uploads/' });
+const storage = multer.diskStorage({
+  destination: 'uploads/',
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname) || '.mp4';
+    const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1E9) + ext;
+    cb(null, uniqueName);
+  }
+});
+const upload = multer({ storage });
 
 // 加强版 JSON 解析：自动剥离 markdown 代码块 + JSON5 容错
 // 加强版 JSON 解析：自动剥离 markdown 代码块 + JSON5 容错。解析失败返回 null，由调用方决定如何处理。
@@ -416,15 +424,12 @@ ${existingStory}
 2. 生成新一集的分镜头列表 (shots)。每个镜头的 shotNumber 从 1 开始，并且每个镜头的 episodeIndex 必须是新集数的索引 (即 ${currentEpisodeCount})。
 3. 【极重要：分镜视频提示词（prompt）生成与时段/秒数划分规范】：
    - 核心语言：必须 100% 使用高质量、高画质的纯简体中文！绝对禁止生成、夹杂任何英文段落、英文翻译、英文绘画提示词（如 [English Prompt: ...] 等）！就中文就够了！
-   - 【严格控制分镜头秒数，绝对禁止大跨度时间范围】：
-     - 视频生成大模型每次只能生成 1 个单一的、连续的镜头 clip (通常为 3-6 秒)。
-     - shots 列表中的每个分镜头，其 duration（持续时间范围）必须非常短（严格在 3 到 6 秒之间，例如 00:00 - 00:03，00:03 - 00:08，00:08 - 00:13）。
-     - 绝对严禁生成任何持续时间大于 6 秒的分镜头（如 '00:09 - 00:25' 这种大跨度区间是绝对被禁止的！）。
-     - 如果续写的某个场景段落很长，你必须将其主动分割成多个连续的、时间段在 3-6 秒之内的独立分镜头对象，并依次列在 shots 数组中！
-   - 【时间段与动作一秒一画、精确对应，绝对禁止 AI 自由发挥】：
-     - 绝对严禁写成如 '【00:09 - 00:25】水下POV第一视角，镜头以极缓慢游动...' 这样含糊大段、让 AI 自由发挥的写法！这是完全不能接受的，绝对禁止！
-     - 正确的写法是：必须将整个镜头时间范围拆分成极其精确的子时间阶段（通常是3-6秒一个子区间），每个子区间必须精确写明几分几秒到几分几秒发生什么。
-     - 格式必须写成如：'00:09 - 00:12 xxx 00:13 - 00:19 xxx 00:20 - 00:25 xxx'。
+   - 【分镜头时长必须自然多样化，禁止统一固定秒数】：
+     - 每个分镜头的时长必须根据场景内容自然变化，禁止所有分镜都是同一个秒数（比如全部5秒）。
+     - 动作简单/节奏快的镜头短（2-4秒），动作丰富/情感重的镜头长（4-8秒），混合搭配。
+     - 不得机械切成统一固定秒数，要让时长服务于叙事节奏！
+   - 【时间段与动作精确对应】：
+     - 每个镜头提示词内按秒粒度细分动作，格式如：'00:00-00:03 @R1_林晚 走向石凳 00:03-00:06 递出银锁 00:06-00:08 老太太惊恐后退'。
      - 必须在提示词内精确细分到每一秒的具体镜头、客观可见动作、画面细节，用连贯的微观节点组成一镜到底！
    - 【台词/对话 100% 融入到画面描述中（极为重要！）】：
      - 如果分镜头包含台词（dialogue 字段），你必须将台词、说话角色当时的面部微表情、肢体动作等视觉动作 100% 融合到该镜头的提示词（prompt）中。
@@ -440,13 +445,13 @@ ${existingStory}
        {
          "shotNumber": 1,
          "episodeIndex": ${currentEpisodeCount},
-         "duration": "该镜头的时间范围，例如：00:00 - 00:05，绝对严禁超过6秒",
+         "duration": "该镜头的时间范围，例如：00:00-00:05，时长根据内容自然变化，禁止统一固定秒数",
          "camera": "电影级、极具高级感的连续多阶段镜头运动和机位",
          "action": "镜头中发生的具体连续动作 and 微表情变化",
          "dialogue": "角色名称：台词（如果有）",
          "sfx": "音效或背景音乐描述",
          "materials": "所用到的素材（例如：@R1_林薇 @S1_公寓大堂）",
-         "prompt": "极度丰富、电影级单镜头高画质纯中文视频提示词，格式如：'【00:00 - 00:05】[中文核心画面视觉描述（包含运镜、动作、融入的台词和镜头参数）]。'"
+         "prompt": "极度丰富、电影级单镜头高画质纯中文视频提示词，纯画面描述，不要带时间前缀。格式如：'@R1_林晚 手持银锁走向石凳上的老太太，缓慢递出银锁...'"
        }
      ],
      "newElements": {
@@ -959,6 +964,43 @@ ${videoPrompt || "无"}
     } catch (e: any) {
       console.error("Export error:", e);
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 视频上传端点
+  app.use("/api/videos", express.static(path.join(process.cwd(), 'uploads')));
+  app.post("/api/upload-video", upload.single('video'), (req: any, res) => {
+    if (!req.file) return res.status(400).json({ error: "No video file uploaded" });
+    res.json({ filename: req.file.filename, originalName: req.file.originalname });
+  });
+
+  // 合并某一集的所有分镜视频
+  app.post("/api/merge-episode-videos", async (req, res) => {
+    try {
+      const { filenames } = req.body;
+      if (!Array.isArray(filenames) || filenames.length < 2) {
+        return res.status(400).json({ error: "至少需要2个视频才能合并" });
+      }
+      const uploadsDir = path.join(process.cwd(), 'uploads');
+      // 检查所有文件是否存在
+      const validFiles = filenames.filter(f => fs.existsSync(path.join(uploadsDir, f)));
+      if (validFiles.length < 2) {
+        return res.status(400).json({ error: "有效视频文件不足2个" });
+      }
+      // 创建 ffmpeg concat 列表文件
+      const concatList = validFiles.map(f => `file '${path.join(uploadsDir, f).replace(/'/g, "'\\''")}'`).join('\n');
+      const listPath = path.join(uploadsDir, `concat_${Date.now()}.txt`);
+      fs.writeFileSync(listPath, concatList, 'utf-8');
+      const outName = `merged_${Date.now()}.mp4`;
+      const outPath = path.join(uploadsDir, outName);
+      const { execSync } = await import('child_process');
+      execSync(`ffmpeg -f concat -safe 0 -i "${listPath}" -c copy -y "${outPath}"`, { stdio: 'pipe', timeout: 60000 });
+      // 清理临时列表文件
+      fs.unlinkSync(listPath);
+      res.json({ filename: outName });
+    } catch (err: any) {
+      console.error("Merge error:", err);
+      res.status(500).json({ error: `视频合并失败: ${err.message || err}。请确保已安装 ffmpeg (brew install ffmpeg)` });
     }
   });
 

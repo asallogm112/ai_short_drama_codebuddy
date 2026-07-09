@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useScripts } from '../hooks/useScripts';
@@ -23,7 +23,8 @@ import {
   Loader2,
   Pencil,
   Trash2,
-  Download
+  Download,
+  Play
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -966,6 +967,12 @@ export function Detail() {
     } else {
       setCollapsedShotsEpisodes({});
     }
+
+    // 5. Load merged videos from script data
+    const savedMerged = (script as any).mergedVideos;
+    if (savedMerged && typeof savedMerged === 'object') {
+      setMergedVideos(savedMerged);
+    }
   }, [script?.id]);
 
   const toggleFullStory = () => {
@@ -1334,6 +1341,46 @@ export function Detail() {
     } finally {
       setIsAddingNextShot(false);
     }
+  };
+
+  // 根据某集剧情直接生成分镜列表
+  const [generatingShotsEp, setGeneratingShotsEp] = useState<number | null>(null);
+  const [generateShotsModal, setGenerateShotsModal] = useState<{ epIndex: number; storyParagraph: string } | null>(null);
+  const [generateShotsReq, setGenerateShotsReq] = useState('');
+  const handleGenerateShotsForEpisode = async (epIndex: number, storyParagraph: string, userReq?: string) => {
+    if (!script || !storyParagraph || generatingShotsEp !== null) return;
+    setGeneratingShotsEp(epIndex);
+    showToast(`正在为第 ${toChineseNumeral(epIndex + 1)} 集生成分镜列表，请稍候...`);
+    try {
+      const paragraphs = (script.story || '').split('\n').map(p => p.trim()).filter(Boolean);
+      const existingStoryUpToNow = paragraphs.slice(0, epIndex).join('\n\n');
+      const formData = new FormData();
+      formData.append('provider', createEpProvider);
+      formData.append('type', 'write');
+      formData.append('continuationPrompt', `当前本集的故事大纲是：“${storyParagraph}”。${userReq ? `用户对该集分镜的特殊需求：${userReq}。` : ''}请根据以上信息和前文发展，生成第 ${epIndex + 1} 集的详细分镜头脚本。`);
+      formData.append('existingStory', existingStoryUpToNow);
+      formData.append('currentEpisodeCount', epIndex.toString());
+      formData.append('elements', JSON.stringify(script.elements));
+      const response = await fetch('/api/continue', { method: 'POST', body: formData });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '生成分镜失败');
+      if (data.storyParagraph || (Array.isArray(data.shots) && data.shots.length > 0)) {
+        const updatedParagraphs = [...paragraphs];
+        updatedParagraphs[epIndex] = data.storyParagraph || paragraphs[epIndex];
+        const filteredShots = script.shots.filter(s => s.episodeIndex !== epIndex);
+        const newShots = Array.isArray(data.shots) ? data.shots.map((s: any) => ({
+          ...s, episodeIndex: epIndex
+        })) : [];
+        updateScript(script.id, {
+          ...script, story: updatedParagraphs.join('\n'),
+          shots: [...filteredShots, ...newShots].sort((a, b) => a.shotNumber - b.shotNumber)
+        });
+        showToast(`第 ${toChineseNumeral(epIndex + 1)} 集分镜列表已生成（${newShots.length} 个镜头）`);
+      }
+    } catch (err: any) {
+      showToast(`生成分镜失败: ${err.message || err}`);
+    }
+    setGeneratingShotsEp(null);
   };
 
   const toggleShotsEpisode = (index: number) => {
@@ -1748,29 +1795,29 @@ export function Detail() {
   };
   // --------------------------------------------------------
 
-  const handleShotVideoUpload = (shotIndex: number, file: File) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = e.target?.result as string;
-      if (dataUrl && script) {
-        const newShots = [...script.shots];
-        newShots[shotIndex] = {
-          ...newShots[shotIndex],
-          videoUrl: dataUrl
-        };
-        const newScript = {
-          ...script,
-          shots: newShots
-        };
-        updateScript(script.id, newScript);
-        showToast(`已成功上传第 ${shotIndex + 1} 个镜头的视频`);
+  const handleShotVideoUpload = async (shotIndex: number, file: File) => {
+    if (!script) return;
+    try {
+      const formData = new FormData();
+      formData.append('video', file);
+      const res = await fetch('/api/upload-video', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '上传失败');
+      const videoUrl = '/api/videos/' + data.filename;
+      const newShots = [...script.shots];
+      newShots[shotIndex] = { ...newShots[shotIndex], videoUrl };
+      const newScript = { ...script, shots: newShots };
+      updateScript(script.id, newScript);
+      showToast(`已成功上传第 ${shotIndex + 1} 个镜头的视频`);
 
-        // 自动截取末尾帧设为下一个分镜的 lastFrameUrl
+        // 自动截取末尾帧设为下一个分镜的 lastFrameUrl（仅限同一集内）
+        const currentEp = script.shots[shotIndex]?.episodeIndex;
         const nextIndex = shotIndex + 1;
-        if (nextIndex < script.shots.length) {
+        const nextEp = script.shots[nextIndex]?.episodeIndex;
+        if (nextIndex < script.shots.length && nextEp === currentEp) {
           const video = document.createElement('video');
           video.crossOrigin = 'anonymous';
-          video.src = dataUrl;
+          video.src = videoUrl;
           video.preload = 'auto';
           video.muted = true;
           video.onloadedmetadata = () => {
@@ -1784,19 +1831,64 @@ export function Detail() {
             if (ctx) {
               ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
               const frameUrl = canvas.toDataURL('image/jpeg', 0.85);
-              const updatedShots = [...script.shots];
+              const updatedShots = [...newScript.shots];
               updatedShots[nextIndex] = { ...updatedShots[nextIndex], lastFrameUrl: frameUrl };
-              const updatedScript = { ...script, shots: updatedShots };
-              updateScript(script.id, updatedScript);
+              const updatedScriptData = { ...newScript, shots: updatedShots };
+              updateScript(script.id, updatedScriptData);
             }
           };
           video.load();
         }
-      }
-    };
-    reader.readAsDataURL(file);
+    } catch (err: any) {
+      showToast(`上传视频失败: ${err.message || err}`);
+    }
   };
   const [fullscreenVideo, setFullscreenVideo] = useState<string | null>(null);
+  const [playingVideos, setPlayingVideos] = useState<Record<number, boolean>>({});
+  const videoRefs = useRef<Record<number, HTMLVideoElement>>({});
+  const [mergedVideos, setMergedVideos] = useState<Record<number, string>>({});
+  const [mergingEpisodes, setMergingEpisodes] = useState<Record<number, boolean>>({});
+  const mergedVideoRefs = useRef<Record<number, HTMLVideoElement>>({});
+  const [playingMerged, setPlayingMerged] = useState<Record<number, boolean>>({});
+
+
+  const handleMergeEpisodeVideos = async (epIndex: number) => {
+    if (!script || mergingEpisodes[epIndex]) return;
+    const epShots = (script.shots || []).filter((s: any) => s.episodeIndex === epIndex);
+    const validShots = epShots.filter((s: any) => s.videoUrl);
+    if (validShots.length < 2) { showToast('该集至少需要2个有视频的分镜才能合并'); return; }
+    setMergingEpisodes(p => ({ ...p, [epIndex]: true }));
+    try {
+      const filenames = validShots.map((s: any) => {
+        const parts = s.videoUrl.split('/');
+        return parts[parts.length - 1];
+      });
+      const res = await fetch('/api/merge-episode-videos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filenames })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      const mergedUrl = '/api/videos/' + data.filename;
+      setMergedVideos(p => ({ ...p, [epIndex]: mergedUrl }));
+      // 持久化到 script 数据中
+      if (script) {
+        const existingMerged = (script as any).mergedVideos || {};
+        updateScript(script.id, { ...script, mergedVideos: { ...existingMerged, [epIndex]: mergedUrl } });
+      }
+      // 自动展开该集
+      setCollapsedShotsEpisodes(p => {
+        const next = { ...p, [epIndex]: false };
+        if (script?.id) localStorage.setItem(`script_shots_episodes_collapsed_map_${script.id}`, JSON.stringify(next));
+        return next;
+      });
+      showToast(`第 ${toChineseNumeral(epIndex + 1)} 集视频合并成功`);
+    } catch (err: any) {
+      showToast(`合并失败: ${err.message || err}`);
+    }
+    setMergingEpisodes(p => ({ ...p, [epIndex]: false }));
+  };
 
   const handleShotKeyframeUpload = async (shotIndex: number, keyframeIndex: number, file: File) => {
     const dataUrl = await new Promise<string>((resolve) => {
@@ -2846,8 +2938,113 @@ export function Detail() {
                           <span className="text-xs text-neutral-400 line-clamp-1 max-w-md ml-4 font-normal hidden sm:inline-block">
                             {paragraph}
                           </span>
+                          {/* 合并分镜 - 完全参考上传视频 */}
+                          {epShots.length >= 2 && (
+                            <span className="ml-5 inline-block align-middle">
+                              {!mergedVideos[epIndex] && !mergingEpisodes[epIndex] && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); handleMergeEpisodeVideos(epIndex); }}
+                                  className="flex flex-col items-center justify-center w-[120px] border border-dashed border-neutral-300 rounded-lg py-3 bg-white hover:bg-neutral-100/50 hover:border-indigo-500 transition-all cursor-pointer group text-center shadow-sm"
+                                  title="合并该集所有分镜视频为一个完整视频"
+                                >
+                                  <Video className="w-5 h-5 text-neutral-400 group-hover:text-indigo-500 mb-1 transition-colors" />
+                                  <span className="text-xs font-semibold text-neutral-600 group-hover:text-indigo-600 transition-colors">合并</span>
+                                </button>
+                              )}
+                              {mergingEpisodes[epIndex] && (
+                                <span className="inline-flex items-center justify-center w-[120px] py-3">
+                                  <Loader2 className="w-6 h-6 text-indigo-500 animate-spin" />
+                                </span>
+                              )}
+                              {mergedVideos[epIndex] && (
+                                <span className="relative inline-block w-[120px] h-[80px] align-middle group">
+                                  <video
+                                    ref={el => { if (el) mergedVideoRefs.current[epIndex] = el; }}
+                                    key={mergedVideos[epIndex]}
+                                    src={mergedVideos[epIndex]}
+                                    className="w-full h-full object-cover rounded-lg bg-black border border-neutral-200 shadow-sm cursor-pointer"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const vid = mergedVideoRefs.current[epIndex];
+                                      if (!vid) return;
+                                      if (vid.paused) { vid.play(); setPlayingMerged(p => ({ ...p, [epIndex]: true })); }
+                                      else { vid.pause(); setPlayingMerged(p => ({ ...p, [epIndex]: false })); }
+                                    }}
+                                    onPlay={() => setPlayingMerged(p => ({ ...p, [epIndex]: true }))}
+                                    onPause={() => setPlayingMerged(p => ({ ...p, [epIndex]: false }))}
+                                  />
+                                  {!playingMerged[epIndex] && (
+                                    <div
+                                      className="absolute inset-0 flex items-center justify-center cursor-pointer"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const vid = mergedVideoRefs.current[epIndex];
+                                        if (!vid) return;
+                                        vid.play();
+                                        setPlayingMerged(p => ({ ...p, [epIndex]: true }));
+                                      }}
+                                    >
+                                      <div className="w-10 h-10 bg-black/60 hover:bg-black/80 rounded-full flex items-center justify-center shadow transition-all hover:scale-110">
+                                        <Play className="w-5 h-5 text-white ml-0.5" />
+                                      </div>
+                                    </div>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); setFullscreenVideo(mergedVideos[epIndex]); }}
+                                    className="absolute top-1 right-1 bg-black/50 hover:bg-black/70 text-white p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                                  >
+                                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); const a = document.createElement('a'); a.href = mergedVideos[epIndex]; a.download = `合并视频_第${epIndex+1}集.mp4`; a.click(); }}
+                                    className="absolute top-1 left-1 bg-black/50 hover:bg-black/70 text-white p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                                    title="导出视频"
+                                  >
+                                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                      <path d="M7 10l5 5 5-5" />
+                                      <path d="M12 15V3" />
+                                    </svg>
+                                  </button>
+                                  {/* 重新合并 */}
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setMergedVideos(p => { const n = { ...p }; delete n[epIndex]; return n; });
+                                      setTimeout(() => handleMergeEpisodeVideos(epIndex), 100);
+                                    }}
+                                    className="absolute -bottom-4 left-1/2 -translate-x-1/2 bg-white border border-neutral-300 rounded px-2 py-0.5 text-[10px] font-bold text-neutral-500 hover:text-indigo-600 hover:border-indigo-300 shadow-sm opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
+                                    title="重新合并"
+                                  >↻ 重新合并</button>
+                                </span>
+                              )}
+                            </span>
+                          )}
                         </div>
-                        <div className="flex items-center space-x-1.5 text-neutral-400">
+                        <div className="flex items-center space-x-2 text-neutral-400">
+                          {epShots.length === 0 && generatingShotsEp !== epIndex && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setGenerateShotsModal({ epIndex, storyParagraph: paragraph }); setGenerateShotsReq(''); }}
+                              className="flex items-center space-x-1 px-2.5 py-1 text-[10px] font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors"
+                              title="弹框输入需求后自动生成分镜列表"
+                            >
+                              <Sparkles className="w-3 h-3" />
+                              <span>生成分镜列表</span>
+                            </button>
+                          )}
+                          {generatingShotsEp === epIndex && (
+                            <span className="flex items-center space-x-1 px-2.5 py-1 text-[10px] font-bold text-indigo-400">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              <span>生成中...</span>
+                            </span>
+                          )}
                           <span className="text-xs">
                             {isCollapsed ? '点击展开' : '点击折叠'}
                           </span>
@@ -2904,14 +3101,55 @@ export function Detail() {
                                           {shot.videoUrl ? (
                                             <div className="space-y-1.5">
                                               <div className="relative group">
-                                                <video src={shot.videoUrl} controls className="w-full object-contain max-h-[220px] rounded-lg bg-black border border-neutral-200 shadow-sm" />
+                                                <video
+                                                  ref={el => { if (el) videoRefs.current[originalIndex] = el; }}
+                                                  key={shot.videoUrl}
+                                                  src={shot.videoUrl}
+                                                  className="w-full object-contain max-h-[220px] rounded-lg bg-black border border-neutral-200 shadow-sm cursor-pointer"
+                                                  onClick={() => {
+                                                    const vid = videoRefs.current[originalIndex];
+                                                    if (!vid) return;
+                                                    if (vid.paused) { vid.play(); setPlayingVideos(p => ({ ...p, [originalIndex]: true })); }
+                                                    else { vid.pause(); setPlayingVideos(p => ({ ...p, [originalIndex]: false })); }
+                                                  }}
+                                                  onPlay={() => setPlayingVideos(p => ({ ...p, [originalIndex]: true }))}
+                                                  onPause={() => setPlayingVideos(p => ({ ...p, [originalIndex]: false }))}
+                                                />
+                                                {/* 中央播放/暂停按钮 */}
+                                                {!playingVideos[originalIndex] && (
+                                                  <div
+                                                    className="absolute inset-0 flex items-center justify-center cursor-pointer"
+                                                    onClick={() => {
+                                                      const vid = videoRefs.current[originalIndex];
+                                                      if (!vid) return;
+                                                      vid.play();
+                                                      setPlayingVideos(p => ({ ...p, [originalIndex]: true }));
+                                                    }}
+                                                  >
+                                                    <div className="w-12 h-12 bg-black/60 hover:bg-black/80 rounded-full flex items-center justify-center shadow-lg transition-all hover:scale-110">
+                                                      <Play className="w-5 h-5 text-white ml-0.5" />
+                                                    </div>
+                                                  </div>
+                                                )}
+                                                <button
+                                                  type="button"
+                                                  onClick={() => { const a = document.createElement('a'); a.href = shot.videoUrl || ''; a.download = `镜头${originalIndex+1}.mp4`; a.click(); }}
+                                                  className="absolute top-1.5 left-1.5 bg-black/50 hover:bg-black/70 text-white p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+                                                  title="导出视频"
+                                                >
+                                                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                    <path d="M7 10l5 5 5-5" />
+                                                    <path d="M12 15V3" />
+                                                  </svg>
+                                                </button>
                                                 <button
                                                   type="button"
                                                   onClick={() => setFullscreenVideo(shot.videoUrl || '')}
-                                                  className="absolute top-1.5 left-1.5 bg-black/50 hover:bg-black/70 text-white p-1 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+                                                  className="absolute top-1.5 right-1.5 bg-black/50 hover:bg-black/70 text-white p-1.5 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
                                                   title="全屏播放"
                                                 >
-                                                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                                                     <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
                                                   </svg>
                                                 </button>
@@ -3544,6 +3782,99 @@ export function Detail() {
         </div>
       )}
 
+      {/* 生成分镜列表弹窗 */}
+      {generateShotsModal !== null && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white border border-neutral-200 rounded-2xl w-full max-w-2xl shadow-2xl animate-in zoom-in-95 duration-200 overflow-hidden flex flex-col max-h-[90vh]">
+            {/* Fixed Header */}
+            <div className="p-6 pb-4 border-b border-neutral-100 shrink-0">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold text-neutral-900 flex items-center space-x-2">
+                  <Sparkles className="w-5 h-5 text-indigo-600" />
+                  <span>生成分镜列表</span>
+                </h3>
+                <button
+                  onClick={() => setGenerateShotsModal(null)}
+                  className="text-neutral-400 hover:text-neutral-600 p-1 rounded-lg transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <p className="text-sm text-neutral-500 mt-1">
+                第 <span className="font-semibold text-neutral-800">{toChineseNumeral(generateShotsModal.epIndex + 1)}</span> 集 — 需求为可选项，不填则按原文生成分镜
+              </p>
+            </div>
+
+            {/* Scrollable Content */}
+            <div className="p-6 pt-4 space-y-4 overflow-y-auto flex-1">
+              {/* 故事大纲（只读参考） */}
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-wider mb-1.5">当前故事大纲（参考）</label>
+                <div className="w-full text-xs font-mono text-neutral-600 bg-neutral-100 border border-neutral-200 rounded-xl p-3 max-h-[120px] overflow-y-auto leading-relaxed whitespace-pre-wrap">
+                  {generateShotsModal.storyParagraph || '（空）'}
+                </div>
+              </div>
+
+              {/* 需求输入 */}
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-wider mb-1.5">分镜需求 <span className="text-neutral-400 font-normal normal-case">（可选）</span></label>
+                <textarea
+                  value={generateShotsReq}
+                  onChange={(e) => setGenerateShotsReq(e.target.value)}
+                  rows={5}
+                  placeholder="例如：紧张悬疑风格，多使用特写和快速切换镜头，突出主角的内心挣扎..."
+                  className="w-full text-sm bg-white border border-neutral-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 resize-none"
+                />
+              </div>
+
+              {/* AI 模型选择 */}
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-wider mb-1.5">AI 模型</label>
+                <select
+                  value={createEpProvider}
+                  onChange={(e) => { setCreateEpProvider(e.target.value as any); localStorage.setItem('create_provider', e.target.value); }}
+                  disabled={generatingShotsEp === generateShotsModal.epIndex}
+                  className="w-full text-sm rounded-lg border border-neutral-300 p-2 bg-white font-medium text-neutral-800 shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="deepseek">DeepSeek（文本逻辑强）</option>
+                  <option value="doubao">火山豆包（故事本地化佳）</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Fixed Footer */}
+            <div className="p-6 pt-4 border-t border-neutral-100 shrink-0">
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setGenerateShotsModal(null)}
+                  disabled={generatingShotsEp === generateShotsModal.epIndex}
+                  className="px-4 py-2 text-sm font-medium text-neutral-600 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors disabled:opacity-40"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => {
+                    const modal = generateShotsModal;
+                    if (!modal) return;
+                    setGenerateShotsModal(null);
+                    handleGenerateShotsForEpisode(modal.epIndex, modal.storyParagraph, generateShotsReq).catch(() => {});
+                  }}
+                  disabled={generatingShotsEp === generateShotsModal.epIndex}
+                  className="px-5 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-sm disabled:opacity-40 disabled:cursor-not-allowed flex items-center space-x-2"
+                >
+                  {generatingShotsEp === generateShotsModal.epIndex ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /><span>AI 生成中...</span></>
+                  ) : (
+                    <Sparkles className="w-4 h-4" />
+                  )}
+                  <span>{generatingShotsEp === generateShotsModal.epIndex ? '' : '开始生成'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 重写分镜提示词弹窗 */}
       {regenerateShotItem !== null && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
@@ -4057,8 +4388,8 @@ export function Detail() {
 
       {/* 全屏视频/图片弹窗 */}
       {fullscreenVideo && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => setFullscreenVideo(null)}>
-          <div className="relative w-full max-w-5xl" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => { setFullscreenVideo(null); setFullscreenTime(0); }}>
+          <div className="relative w-full max-w-5xl flex flex-col items-center" onClick={e => e.stopPropagation()}>
             <button
               type="button"
               onClick={() => setFullscreenVideo(null)}
@@ -4066,8 +4397,8 @@ export function Detail() {
             >
               <X className="w-6 h-6" />
             </button>
-            {fullscreenVideo.startsWith('data:video') || fullscreenVideo.startsWith('blob:') ? (
-              <video src={fullscreenVideo} controls autoPlay className="w-full max-h-[85vh] rounded-xl bg-black shadow-2xl" />
+            {fullscreenVideo.startsWith('data:video') || fullscreenVideo.startsWith('blob:') || fullscreenVideo.startsWith('/api/videos/') || fullscreenVideo.endsWith('.mp4') ? (
+              <video key={fullscreenVideo} src={fullscreenVideo} controls autoPlay className="w-full max-h-[85vh] rounded-xl bg-black shadow-2xl" />
             ) : (
               <img src={fullscreenVideo} alt="预览" className="w-full max-h-[85vh] object-contain rounded-xl bg-black shadow-2xl" />
             )}
