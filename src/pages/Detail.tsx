@@ -189,51 +189,11 @@ const formatPromptTags = (text: string, elementNames: string[] = [], elementsLis
     const code = parts[0];
     const cleanName = parts.slice(1).join('_');
     if (fullName && code) {
-      const synonymsSet = new Set<string>();
-      
-      // If elementsList is provided and it has a matching character, extract synonyms
-      if (elementsList.length > 0) {
-        const matchingEl = elementsList.find(el => el.name === fullName);
-        if (matchingEl && matchingEl.elementType === 'characters') {
-          const desc = (matchingEl.description || "").toLowerCase();
-          const nameLower = cleanName.toLowerCase();
-          
-          const patterns = [
-            "年轻女性", "年轻女子", "女子", "女孩", "女主角", "女主", "女人", "姑娘", "少妇", "美妇", "老妇", "老太太",
-            "年轻男性", "年轻男子", "男子", "男孩", "男主角", "男主", "男人", "小伙", "老头", "中年男子", "中年女性", "西装男子", "老者"
-          ];
-          
-          patterns.forEach(p => {
-            if (desc.includes(p) || nameLower.includes(p)) {
-              synonymsSet.add(p);
-            }
-          });
-          
-          const isFemale = /女|妈|妻|姐|妹|婆|女|薇|雪|雅|颖|馨|倩|娜|婷|莉/i.test(cleanName) || /女|女性|女孩|女子|少女|女人/i.test(desc);
-          const isMale = /男|爸|夫|哥|弟|爷|公|峰|强|超|军|平|明|刚|杰|涛|波|辉|健/i.test(cleanName) || /男|男性|男孩|男子|男人/i.test(desc);
-          
-          if (isFemale && femaleCharsCount === 1) {
-            ["年轻女性", "年轻女子", "女子", "女孩", "女人", "女主角", "女主", "姑娘", "她"].forEach(s => synonymsSet.add(s));
-          }
-          if (isMale && maleCharsCount === 1) {
-            ["年轻男性", "年轻男子", "男子", "男孩", "男人", "男主角", "男主", "小伙", "他"].forEach(s => synonymsSet.add(s));
-          }
-          
-          if (code === 'R1') {
-            if (isFemale) {
-              ["年轻女性", "年轻女子", "女子", "女孩", "女人", "女主角", "女主"].forEach(s => synonymsSet.add(s));
-            } else if (isMale) {
-              ["年轻男性", "年轻男子", "男子", "男孩", "男人", "男主角", "男主"].forEach(s => synonymsSet.add(s));
-            }
-          }
-        }
-      }
-      
       parsedElements.push({
         fullName,
         code,
         cleanName,
-        synonyms: Array.from(synonymsSet).filter(s => s && s.length >= 2)
+        synonyms: [cleanName]
       });
     }
   });

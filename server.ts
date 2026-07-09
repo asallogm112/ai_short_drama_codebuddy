@@ -271,30 +271,11 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
               const parts = fullName.split('_');
               const code = parts[0] || '';
               const cleanName = parts.slice(1).join('_') || '';
-              const synonymsSet = new Set<string>();
-
-              if (cleanName) {
-                synonymsSet.add(cleanName);
-              }
-
-              if (cat.type === 'characters') {
-                const desc = (item.description || "").toLowerCase();
-                const isFemale = desc.includes("女") || desc.includes("female") || desc.includes("she") || desc.includes("her");
-                const isMale = desc.includes("男") || desc.includes("male") || desc.includes("he") || desc.includes("his");
-
-                if (isFemale && femaleCharsCount === 1) {
-                  ["年轻女性", "年轻女子", "女子", "女孩", "女人", "女主角", "女主", "姑娘", "她"].forEach(s => synonymsSet.add(s));
-                }
-                if (isMale && maleCharsCount === 1) {
-                  ["年轻男性", "年轻男子", "男子", "男孩", "男人", "男主角", "男主", "小伙子", "他"].forEach(s => synonymsSet.add(s));
-                }
-              }
-
               parsedElements.push({
                 fullName,
                 code,
                 cleanName,
-                synonyms: Array.from(synonymsSet)
+                synonyms: cleanName ? [cleanName] : []
               });
             }
           }
