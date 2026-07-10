@@ -63,7 +63,7 @@ const compressDataUrl = (dataUrl: string, maxSize = 800, quality = 0.7): Promise
 };
 
 export function Materials() {
-  const { materials, addMaterial, removeMaterial, clearAll } = useMaterials();
+  const { materials, addMaterial, removeMaterial, clearAll, loaded } = useMaterials();
   const [activeTab, setActiveTab] = useState<'all' | LibraryMaterial['type']>('all');
   const [query, setQuery] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -160,6 +160,14 @@ export function Materials() {
     showToast('已删除');
   };
 
+  if (!loaded) {
+    return (
+      <div className="flex flex-col items-center justify-center h-[50vh] space-y-4">
+        <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+        <p className="text-neutral-500 text-sm">加载中...</p>
+      </div>
+    );
+  }
   return (
     <div className="space-y-8">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -482,7 +490,7 @@ export function Materials() {
       {/* Toast */}
       <div
         id="materials-toast"
-        className="fixed bottom-5 right-5 z-[120] bg-neutral-900 text-white px-4 py-3 rounded-xl shadow-2xl border border-neutral-800 flex items-center space-x-2 opacity-0 transition-opacity duration-300 pointer-events-none"
+        className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[120] bg-neutral-900 text-white px-4 py-3 rounded-xl shadow-2xl border border-neutral-800 flex items-center space-x-2 opacity-0 transition-opacity duration-300 pointer-events-none"
       >
         <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
         <span className="text-xs font-semibold tracking-wide"></span>

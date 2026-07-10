@@ -945,7 +945,7 @@ function cleanElementPrompt(text: string): string {
 export function Detail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { getScript, deleteScript, updateScript } = useScripts();
+  const { getScript, deleteScript, updateScript, loaded: scriptsLoaded } = useScripts();
   const { addMaterial } = useMaterials();
   
   const script = getScript(id || '');
@@ -1110,10 +1110,6 @@ export function Detail() {
   const [regenerateElementReq, setRegenerateElementReq] = useState('');
   const [regenerateElementError, setRegenerateElementError] = useState<string | null>(null);
     const [regeneratingElementKey, setRegeneratingElementKey] = useState<string | null>(null);
-
-  // 所有弹框打开时锁定主页面滚动
-  const anyModalOpen = isCreateEpisodeOpen || editingEpIndex !== null || generateShotsModal !== null || regenerateShotItem !== null || regenerateElementItem !== null || deletingShotIndex !== null || addShotAfterIndex !== null || deletingEpIndex !== null || regenerateEpModalIndex !== null || showDeleteConfirm || keyframeModal !== null || isImportElementsOpen || isImportShotsOpen || fullscreenVideo !== null;
-  useBodyScrollLock(anyModalOpen);
 
   // 解析并导入素材（角色/场景/道具）
   const handleImportElements = async () => {
@@ -1974,6 +1970,9 @@ export function Detail() {
   const mergedVideoRefs = useRef<Record<number, HTMLVideoElement>>({});
   const [playingMerged, setPlayingMerged] = useState<Record<number, boolean>>({});
 
+  // 所有弹框打开时锁定主页面滚动（必须在所有 useState 之后）
+  const anyModalOpen = isCreateEpisodeOpen || editingEpIndex !== null || generateShotsModal !== null || regenerateShotItem !== null || regenerateElementItem !== null || deletingShotIndex !== null || addShotAfterIndex !== null || deletingEpIndex !== null || regenerateEpModalIndex !== null || showDeleteConfirm || keyframeModal !== null || isImportElementsOpen || isImportShotsOpen || fullscreenVideo !== null;
+  useBodyScrollLock(anyModalOpen);
 
   const handleMergeEpisodeVideos = async (epIndex: number) => {
     if (!script || mergingEpisodes[epIndex]) return;
@@ -2041,6 +2040,14 @@ export function Detail() {
     setToastTimeoutId(id);
   };
 
+  if (!scriptsLoaded) {
+    return (
+      <div className="flex flex-col items-center justify-center h-[50vh] text-center space-y-4">
+        <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+        <p className="text-neutral-500 text-sm">加载中...</p>
+      </div>
+    );
+  }
   if (!script) {
     return (
       <div className="flex flex-col items-center justify-center h-[50vh] text-center space-y-4">
@@ -2896,7 +2903,20 @@ export function Detail() {
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 {script.elements.scenes.map((scene, i) => (
                   <div key={i} className="bg-white border border-neutral-200 rounded-xl overflow-hidden shadow-sm flex flex-col h-full hover:shadow-md transition-shadow">
-                    <div className="relative w-full h-48 bg-neutral-100 group/image">
+                                        <div className="relative w-full h-48 bg-neutral-100 group/image">
+                      {/* 保存到素材库 - 场景图片右上角（无论是否有图都显示） */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!script) return;
+                          const res = addMaterial({ type: 'scenes', name: scene.name, description: scene.description, prompt: scene.prompt, imageUrl: scene.imageUrl, sourceScriptId: script.id, sourceScriptTitle: script.title });
+                          showToast(res.added ? '已保存到素材库' : '该素材已在素材库中（已更新）');
+                        }}
+                        title="保存到素材库"
+                        className="absolute top-2 right-2 z-20 p-1.5 bg-white/90 border border-neutral-200 shadow-sm rounded-md text-neutral-600 hover:bg-indigo-50 hover:text-indigo-600 transition-all flex items-center justify-center"
+                      >
+                        <BookmarkPlus className="w-3.5 h-3.5 text-current" />
+                      </button>
                       {scene.imageUrl ? (
                         <>
                           <img
@@ -2905,8 +2925,8 @@ export function Detail() {
                             className="w-full h-full object-contain cursor-pointer"
                             onClick={() => setFullscreenVideo(scene.imageUrl || '')}
                           />
-                          <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover/image:opacity-100 transition-opacity pointer-events-none">
-                            <label className="text-white text-sm font-medium bg-black/60 px-3 py-1.5 rounded-lg cursor-pointer pointer-events-auto hover:bg-black/80 transition-colors">
+                          <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover/image:opacity-100 transition-opacity z-10">
+                            <label className="text-white text-sm font-medium bg-black/60 px-3 py-1.5 rounded-lg cursor-pointer pointer-events-auto hover:bg-black/70 transition-colors">
                               更改图片
                               <input
                                 type="file"
@@ -2948,19 +2968,7 @@ export function Detail() {
                       onSave={(newVal) => {
                         handleSaveElementPrompt('scenes', i, newVal);
                       }}
-                      onSaveToLibrary={() => {
-                        if (!script) return;
-                        const res = addMaterial({
-                          type: 'scenes',
-                          name: scene.name,
-                          description: scene.description,
-                          prompt: scene.prompt,
-                          imageUrl: scene.imageUrl,
-                          sourceScriptId: script.id,
-                          sourceScriptTitle: script.title,
-                        });
-                        showToast(res.added ? '已保存到素材库' : '该素材已在素材库中（已更新）');
-                      }}
+
                       onRegenerate={() => {
                         setRegenerateElementItem({ type: 'scenes', index: i, name: scene.name, description: scene.description, prompt: scene.prompt });
                         setRegenerateElementReq('');
@@ -2983,7 +2991,20 @@ export function Detail() {
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 {script.elements.props.map((prop, i) => (
                   <div key={i} className="bg-white border border-neutral-200 rounded-xl overflow-hidden shadow-sm flex flex-col h-full hover:shadow-md transition-shadow">
-                    <div className="relative w-full h-48 bg-neutral-100 group/image">
+                                        <div className="relative w-full h-48 bg-neutral-100 group/image">
+                      {/* 保存到素材库 - 道具图片右上角（无论是否有图都显示） */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!script) return;
+                          const res = addMaterial({ type: 'props', name: prop.name, description: prop.description, prompt: prop.prompt, imageUrl: prop.imageUrl, sourceScriptId: script.id, sourceScriptTitle: script.title });
+                          showToast(res.added ? '已保存到素材库' : '该素材已在素材库中（已更新）');
+                        }}
+                        title="保存到素材库"
+                        className="absolute top-2 right-2 z-20 p-1.5 bg-white/90 border border-neutral-200 shadow-sm rounded-md text-neutral-600 hover:bg-indigo-50 hover:text-indigo-600 transition-all flex items-center justify-center"
+                      >
+                        <BookmarkPlus className="w-3.5 h-3.5 text-current" />
+                      </button>
                       {prop.imageUrl ? (
                         <>
                           <img
@@ -2992,8 +3013,8 @@ export function Detail() {
                             className="w-full h-full object-contain cursor-pointer"
                             onClick={() => setFullscreenVideo(prop.imageUrl || '')}
                           />
-                          <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover/image:opacity-100 transition-opacity pointer-events-none">
-                            <label className="text-white text-sm font-medium bg-black/60 px-3 py-1.5 rounded-lg cursor-pointer pointer-events-auto hover:bg-black/80 transition-colors">
+                          <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover/image:opacity-100 transition-opacity z-10">
+                            <label className="text-white text-sm font-medium bg-black/60 px-3 py-1.5 rounded-lg cursor-pointer pointer-events-auto hover:bg-black/70 transition-colors">
                               更改图片
                               <input
                                 type="file"
@@ -3035,19 +3056,7 @@ export function Detail() {
                       onSave={(newVal) => {
                         handleSaveElementPrompt('props', i, newVal);
                       }}
-                      onSaveToLibrary={() => {
-                        if (!script) return;
-                        const res = addMaterial({
-                          type: 'props',
-                          name: prop.name,
-                          description: prop.description,
-                          prompt: prop.prompt,
-                          imageUrl: prop.imageUrl,
-                          sourceScriptId: script.id,
-                          sourceScriptTitle: script.title,
-                        });
-                        showToast(res.added ? '已保存到素材库' : '该素材已在素材库中（已更新）');
-                      }}
+
                         onRegenerate={() => {
                           setRegenerateElementItem({ type: 'props', index: i, name: prop.name, description: prop.description, prompt: prop.prompt });
                           setRegenerateElementReq('');
@@ -4711,7 +4720,7 @@ export function Detail() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 15, scale: 0.95 }}
             transition={{ duration: 0.2, ease: "easeOut" }}
-            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[150] flex items-center space-x-2 bg-neutral-900 text-white px-5 py-3 rounded-full shadow-2xl border border-neutral-800 backdrop-blur-md"
+            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[150] flex items-center space-x-2 bg-neutral-900 text-white px-5 py-3 rounded-full shadow-2xl border border-neutral-800 backdrop-blur-md"
           >
             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse mr-1" />
             <span className="text-xs font-semibold tracking-wide">{toastMessage}</span>

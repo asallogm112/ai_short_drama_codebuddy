@@ -4,7 +4,7 @@ import { useScripts } from '../hooks/useScripts';
 import { FileVideo, Calendar, ArrowRight, PlusCircle, Trash2 } from 'lucide-react';
 
 export function Home() {
-  const { scripts, deleteScript } = useScripts();
+  const { scripts, deleteScript, loaded } = useScripts();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [scriptToDelete, setScriptToDelete] = useState<any>(null);
@@ -36,6 +36,14 @@ export function Home() {
     showToast('剧本已成功删除！');
   };
 
+  if (!loaded) {
+    return (
+      <div className="flex flex-col items-center justify-center h-[60vh] text-center space-y-4">
+        <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+        <p className="text-neutral-500 text-sm">加载中...</p>
+      </div>
+    );
+  }
   if (scripts.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-[60vh] text-center space-y-6">
