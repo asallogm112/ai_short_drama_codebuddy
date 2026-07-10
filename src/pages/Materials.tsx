@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef } from 'react';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import { Library, Search, Copy, Trash2, Image as ImageIcon, Users, MapPin, Box, Filter, Plus, X, Upload } from 'lucide-react';
 import { useMaterials } from '../hooks/useMaterials';
 import { LibraryMaterial } from '../types';
@@ -81,6 +82,7 @@ export function Materials() {
 
   // 删除二次确认
   const [pendingDelete, setPendingDelete] = useState<LibraryMaterial | null>(null);
+  useBodyScrollLock(showAdd || pendingDelete !== null);
 
   const filtered = useMemo(() => {
     let list = materials;

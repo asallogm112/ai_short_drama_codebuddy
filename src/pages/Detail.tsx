@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useScripts } from '../hooks/useScripts';
 import { useMaterials } from '../hooks/useMaterials';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import { 
   ArrowLeft, 
   BookOpen, 
@@ -927,6 +928,20 @@ const CollapsiblePrompt = ({
   );
 };
 
+// 前端清洗：去重元素提示词里的「只生成 N 张图片」和「图片比例」重复（与服务端一致）
+function cleanImageRatio(text: string): string {
+  if (!text) return text;
+  return text.replace(/图片比例\s*[:：]\s*[^，。,]*[，,]?/g, '').replace(/[，,]{2,}/g, '，').trim();
+}
+function cleanElementPrompt(text: string): string {
+  if (!text) return text;
+  let t = text;
+  t = t.replace(/只\s*生成\s*\d+\s*张?\s*图片/gi, '');
+  t = cleanImageRatio(t);
+  t = t.replace(/[，,]{2,}/g, '，').replace(/\s{2,}/g, ' ').replace(/^[，,\s、]+/g, '').replace(/[，,\s、]+$/g, '').trim();
+  return t;
+}
+
 export function Detail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -934,6 +949,30 @@ export function Detail() {
   const { addMaterial } = useMaterials();
   
   const script = getScript(id || '');
+
+  // 加载时自动清洗 localStorage 中旧数据的元素提示词重复
+  useEffect(() => {
+    if (!script) return;
+    let dirty = false;
+    const types: Array<'characters' | 'scenes' | 'props'> = ['characters', 'scenes', 'props'];
+    const newElements = { ...(script.elements || {}) };
+    for (const type of types) {
+      const list = newElements[type];
+      if (!list || !Array.isArray(list)) continue;
+      newElements[type] = list.map((item: any) => {
+        if (!item.prompt) return item;
+        const cleaned = cleanElementPrompt(item.prompt);
+        if (cleaned !== item.prompt) {
+          dirty = true;
+          return { ...item, prompt: cleaned };
+        }
+        return item;
+      });
+    }
+    if (dirty) {
+      updateScript(script.id, { ...script, elements: newElements });
+    }
+  }, []);
   const elements = script ? [
     ...(script.elements?.characters || []).map((char: any, index: number) => ({ ...char, elementType: 'characters', elementIndex: index })),
     ...(script.elements?.scenes || []).map((scene: any, index: number) => ({ ...scene, elementType: 'scenes', elementIndex: index })),
@@ -1071,6 +1110,10 @@ export function Detail() {
   const [regenerateElementReq, setRegenerateElementReq] = useState('');
   const [regenerateElementError, setRegenerateElementError] = useState<string | null>(null);
     const [regeneratingElementKey, setRegeneratingElementKey] = useState<string | null>(null);
+
+  // 所有弹框打开时锁定主页面滚动
+  const anyModalOpen = isCreateEpisodeOpen || editingEpIndex !== null || generateShotsModal !== null || regenerateShotItem !== null || regenerateElementItem !== null || deletingShotIndex !== null || addShotAfterIndex !== null || deletingEpIndex !== null || regenerateEpModalIndex !== null || showDeleteConfirm || keyframeModal !== null || isImportElementsOpen || isImportShotsOpen || fullscreenVideo !== null;
+  useBodyScrollLock(anyModalOpen);
 
   // 解析并导入素材（角色/场景/道具）
   const handleImportElements = async () => {
@@ -1750,7 +1793,21 @@ export function Detail() {
       }
       
       const newPrompt = data.prompt || '';
-      handleSaveElementPrompt(type, index, newPrompt);
+      // 去除模型返回的名字前缀（如 R1_林辰  :  ），只保存纯提示词内容
+      let cleanPrompt = newPrompt.trim();
+      if (script) {
+        const item = script.elements[type][index];
+        if (item) {
+          const cleanName = item.name.trim();
+          const prefixRegex = new RegExp('^' + cleanName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\s*[:：]\\s*', 'i');
+          const genericPrefixRegex = /^[RSP]\d+_[^:：]+[:：]\s*/i;
+          cleanPrompt = cleanPrompt.replace(prefixRegex, '').replace(genericPrefixRegex, '');
+        }
+        const newElements = [...script.elements[type]];
+        newElements[index] = { ...newElements[index], prompt: cleanPrompt };
+        const newScript = { ...script, elements: { ...script.elements, [type]: newElements } };
+        updateScript(script.id, newScript);
+      }
       showToast(`重新生成提示词成功`);
     } catch (err: any) {
       console.error(err);
@@ -2784,6 +2841,27 @@ export function Detail() {
                           />
                         </label>
                       )}
+                      {/* 保存到素材库 - 角色图片右上角 */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!script) return;
+                          const res = addMaterial({
+                            type: 'characters',
+                            name: char.name,
+                            description: char.description,
+                            prompt: char.prompt,
+                            imageUrl: char.imageUrl,
+                            sourceScriptId: script.id,
+                            sourceScriptTitle: script.title,
+                          });
+                          showToast(res.added ? '已保存到素材库' : '该素材已在素材库中（已更新）');
+                        }}
+                        title="保存到素材库"
+                        className="absolute top-2 right-2 z-10 p-1.5 bg-white/90 border border-neutral-200 shadow-sm rounded-md text-neutral-600 hover:bg-indigo-50 hover:text-indigo-600 transition-all flex items-center justify-center"
+                      >
+                        <BookmarkPlus className="w-3.5 h-3.5 text-current" />
+                      </button>
                     </div>
                     <div className="p-5 border-b border-neutral-100 flex-1 flex flex-col justify-center">
                       <h4 className="text-lg font-bold text-neutral-900 mb-0">{char.name}</h4>
@@ -2796,19 +2874,6 @@ export function Detail() {
                       onCopy={() => copyToClipboard(formatPromptWithPrefix(char.name, char.prompt, 'characters'), '角色提示词')}
                       onSave={(newVal) => {
                         handleSaveElementPrompt('characters', i, newVal);
-                      }}
-                      onSaveToLibrary={() => {
-                        if (!script) return;
-                        const res = addMaterial({
-                          type: 'characters',
-                          name: char.name,
-                          description: char.description,
-                          prompt: char.prompt,
-                          imageUrl: char.imageUrl,
-                          sourceScriptId: script.id,
-                          sourceScriptTitle: script.title,
-                        });
-                        showToast(res.added ? '已保存到素材库' : '该素材已在素材库中（已更新）');
                       }}
                       onRegenerate={() => {
                         setRegenerateElementItem({ type: 'characters', index: i, name: char.name, description: char.description, prompt: char.prompt });
@@ -3036,7 +3101,7 @@ export function Detail() {
                   <span>导入分镜列表</span>
                 </button>
               </div>
-              
+
               <div className="space-y-4">
                 {storyParagraphs.map((paragraph, epIndex) => {
                   const isCollapsed = collapsedShotsEpisodes[epIndex] ?? true;

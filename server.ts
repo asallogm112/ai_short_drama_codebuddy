@@ -58,19 +58,40 @@ function safeParseJson(text: string): any {
   }
 }
 
-// 统一去重「图片比例」片段：模型可能把结尾格式重复多遍（图片比例 : ，图片比例 : ，图片比例 : 16:9），
-// 这里移除所有片段，仅保留一个规范比例（优先用模型给出的非空值，否则用 defaultRatio）。
-// 同时兼容全角/半角冒号(：:)与逗号(，,)。
-function cleanImageRatio(text: string, defaultRatio: string = '16:9'): string {
+// 完全移除所有「图片比例」片段，不做任何补充
+function cleanImageRatio(text: string): string {
   if (!text) return text;
-  const ratioRe = /图片比例\s*[:：]\s*([^，。,]*)[，,]?/g;
-  const matches = [...text.matchAll(ratioRe)];
-  let val = defaultRatio;
-  for (const m of matches) {
-    const v = (m[1] || '').trim();
-    if (v) { val = v; break; }
-  }
-  return text.replace(ratioRe, '').trim() + '，图片比例 : ' + val;
+  return text.replace(/图片比例\s*[:：]\s*[^，。,]*[，,]?/g, '').replace(/[，,]{2,}/g, '，').trim();
+}
+
+// 清理元素提示词：移除所有「只生成 N 张图片」和「图片比例」内容，不做任何补充
+function cleanElementPrompt(text: string): string {
+  if (!text) return text;
+  let t = text;
+  // 移除所有「只生成 N 张图片」
+  t = t.replace(/只\s*生成\s*\d+\s*张?\s*图片/gi, '');
+  // 移除所有「图片比例 : X」
+  t = cleanImageRatio(t);
+  // 清理残留的连续逗号/空白
+  t = t.replace(/[，,]{2,}/g, '，').replace(/\s{2,}/g, ' ').replace(/^[，,\s、]+/g, '').replace(/[，,\s、]+$/g, '').trim();
+  return t;
+}
+
+// 强制把分镜提示词按「时间切片」拆成独立行：每个 X-Y秒 必须位于该行行首。
+// 模型有时会下一刀时间戳接在上一句末尾，这里用正则把所有时间片段前补换行，再清理行首空白。
+function normalizeShotPrompt(text: string): string {
+  if (!text) return text;
+  // 在每个 “数字-数字秒”（如 0-2秒 / 2-3.5秒 / 8-10秒）前插入换行
+  let out = text.replace(/(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)秒/g, '\n$&');
+  // 去掉开头多余的换行
+  out = out.replace(/^\n+/, '');
+  // 逐行清理：去掉行首空白，保证时间位于行首
+  out = out
+    .split('\n')
+    .map((line) => line.replace(/^\s+/, ''))
+    .filter((line) => line.length > 0)
+    .join('\n');
+  return out;
 }
 
 async function startServer() {
@@ -177,6 +198,7 @@ async function startServer() {
 ## 二、单切片固定语法（每段必须严格遵循）
 「起-止秒 ｜ 景别 · 拍摄角度 · 镜头运动 ｜ 主体动作 ｜ 光效/细节」
 示例：2-2.5秒 ｜ 近景 · 低角度仰拍 · 定住微抖 ｜ 林晚低头，指尖捏住腰间银锁 ｜ 衣角静止，暮色冷光勾边
+- **【强制换行 · 最重要】每一个切片必须【单独成行】，该切片的时间前缀（起-止秒）必须位于【这一行的行首】。上一切片的内容结束后必须【换行】，再写下一切片的时间前缀。绝对禁止把下一个切片的时间戳接在上一切片内容的末尾（例如错误写法：「…镀金边 1.5-3秒 ｜ 中全景…」必须改为：上一句结束后回车换行，新行以「1.5-3秒 ｜」开头）。**
 - 景别、拍摄角度、镜头运动三者每段必写，缺一不可。
 - 光效/细节每段必写一句，提升画面丰富度（丁达尔光、霓虹反射、衣角飘动、水面高光、烛光摇曳等）。
 - 复用素材引用：@Rxx/@Sxx/@Pxx 素材引用前后各空 2 格。
@@ -193,7 +215,7 @@ async function startServer() {
 ## 四、连续性铁律
 相邻切片之间姿态必须连续：上一段结尾的状态 = 下一段开头的起点。严禁人物瞬移、动作跳帧、景别硬切不连贯。段与段用姿态自然衔接，不要生硬标注「镜头切到」。
 
-## 五、分镜标准输出模板（纯示意，时间轴请按内容智能切分）
+## 五、分镜标准输出模板（纯示意，时间轴请按内容智能切分；下方每一行是一个【独立切片】，时间都在行首）
 **镜1 (0-10s) 【功能标注】**
 0-2秒 ｜ 远景 · 平视 · 缓慢横移 ｜ 林晚提裙沿青石路走入井畔，远处炊烟归鸟 ｜ 三层景深，前景落叶中景人物背景村落
 2-2.5秒 ｜ 近景 · 低角度仰拍 · 定住微抖 ｜ 林晚低头，指尖捏住腰间银锁 ｜ 衣角静止，暮色冷光勾边
@@ -317,18 +339,7 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
           if (!cleanPrompt.includes("全身像") || !cleanPrompt.includes("纯色背景")) {
             cleanPrompt = `${targetKeywords}，${cleanPrompt}`;
           }
-          cleanPrompt = cleanPrompt.replace(/比例\s*为?\s*3\s*:\s*1/gi, '');
-          cleanPrompt = cleanPrompt.replace(/3\s*:\s*1/g, '');
-          cleanPrompt = cleanPrompt.replace(/(图片|比例)?\s*比例?\s*为?\s*16\s*:\s*9/gi, '');
-          cleanPrompt = cleanPrompt.replace(/16\s*:\s*9/g, '');
-          cleanPrompt = `${cleanPrompt}，图片比例 : 16:9`;
         }
-
-        const suffixPattern = /[，,、]?\s*(生成|只生成)\s*1\s*张(图片)?\s*,\s*如果\s*生成过\s*,\s*就不要再生成了\s*\.?\s*(切记\s*切记\s*,\s*因为要\s*保证\s*一致性\s*!)?/gi;
-        cleanPrompt = cleanPrompt.replace(suffixPattern, '');
-        cleanPrompt = cleanPrompt.replace(/[，,、]?\s*切记\s*切记\s*,\s*因为要\s*保证\s*一致性\s*!/gi, '');
-        cleanPrompt = cleanPrompt.trim().replace(/[，。,\.\s]+$/, '');
-        cleanPrompt = `${cleanPrompt}，只生成 1 张图片`;
 
         return `${cleanName}  :  ${cleanPrompt.trim()}`;
       };
@@ -368,19 +379,19 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
           if (parsedData.elements.characters && Array.isArray(parsedData.elements.characters)) {
             parsedData.elements.characters = parsedData.elements.characters.map((char: any) => ({
               ...char,
-              prompt: cleanImageRatio(enforcePrefix(char.name, char.prompt, 'characters'))
+              prompt: cleanElementPrompt(enforcePrefix(char.name, char.prompt, 'characters'))
             }));
           }
           if (parsedData.elements.scenes && Array.isArray(parsedData.elements.scenes)) {
             parsedData.elements.scenes = parsedData.elements.scenes.map((scene: any) => ({
               ...scene,
-              prompt: cleanImageRatio(enforcePrefix(scene.name, scene.prompt, 'scenes'))
+              prompt: cleanElementPrompt(enforcePrefix(scene.name, scene.prompt, 'scenes'))
             }));
           }
           if (parsedData.elements.props && Array.isArray(parsedData.elements.props)) {
             parsedData.elements.props = parsedData.elements.props.map((prop: any) => ({
               ...prop,
-              prompt: cleanImageRatio(enforcePrefix(prop.name, prop.prompt, 'props'))
+              prompt: cleanElementPrompt(enforcePrefix(prop.name, prop.prompt, 'props'))
             }));
           }
         }
@@ -388,7 +399,7 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
         if (parsedData.shots && Array.isArray(parsedData.shots)) {
           parsedData.shots = parsedData.shots.map((shot: any) => ({
             ...shot,
-            prompt: enforceShotPromptTags(shot.prompt, parsedElements)
+            prompt: normalizeShotPrompt(enforceShotPromptTags(shot.prompt, parsedElements))
           }));
         }
       }
@@ -441,6 +452,7 @@ ${existingStory}
      - 分段长度 = 该时间段内动作强度的函数：平缓交代/空镜/过渡 → 2–3 秒长拍（配 远景/全景/侧拍）；普通表演 → 1–2 秒（配 中景/中近景）；关键微动作/情绪转折/高光 → 0.5–1 秒短拍（配 近景/特写/低角度仰拍/高角度俯拍）。
      - 具体起止秒数由你按该镜实际内容现编，**不要套固定模板**（例：0-2/2-2.5/2.5-5/5-6/6-8/8-8.5/8.5-10 仅为示例，非固定序列）。
    - 【单切片固定语法（每段必写）】：「起-止秒 ｜ 景别 · 拍摄角度 · 镜头运动 ｜ 主体动作 ｜ 光效/细节」。景别/角度/运动三者每段必写缺一不可；光效/细节每段必写一句（丁达尔光、霓虹反射、衣角飘动、水面高光、烛光摇曳等）。示例：2-2.5秒 ｜ 近景 · 低角度仰拍 · 定住微抖 ｜ 林晚低头，指尖捏住银锁 ｜ 暮色冷光勾边
+   - **【强制换行 · 最重要】每一个切片必须【单独成行】，该切片的时间前缀必须位于【这一行的行首】；上一切片内容结束后必须换行再写下一切片的时间前缀。绝对禁止把下一个切片的时间戳接在上一切片内容末尾（例如错误：「…镀金边 1.5-3秒 ｜ 中全景…」必须改为上一句回车换行、新行以「1.5-3秒 ｜」开头）。**
    - 【纯画面 + 连续性铁律】：prompt 字段只写视觉画面，不写台词、不写音效、不写绝对时间戳（00:10-00:20）。台词填到 dialogue 字段，音效填到 sfx 字段。相邻切片姿态必须连续（上一段结尾 = 下一段开头），严禁人物瞬移、动作跳帧、景别硬切不连贯。
    - 【素材一致性 @ 完整名称】：
      - 只要提及已有元素（角色、场景、道具），必须 100% 以带 @ 的完整名称格式出现（例如 @R1_林薇、@S1_深夜荒河滩）。
@@ -541,18 +553,7 @@ ${existingStory}
           if (!cleanPrompt.includes("全身像") || !cleanPrompt.includes("纯色背景")) {
             cleanPrompt = `${targetKeywords}，${cleanPrompt}`;
           }
-          cleanPrompt = cleanPrompt.replace(/比例\s*为?\s*3\s*:\s*1/gi, '');
-          cleanPrompt = cleanPrompt.replace(/3\s*:\s*1/g, '');
-          cleanPrompt = cleanPrompt.replace(/(图片|比例)?\s*比例?\s*为?\s*16\s*:\s*9/gi, '');
-          cleanPrompt = cleanPrompt.replace(/16\s*:\s*9/g, '');
-          cleanPrompt = `${cleanPrompt}，图片比例 : 16:9`;
         }
-
-        const suffixPattern = /[，,、]?\s*(生成|只生成)\s*1\s*张(图片)?\s*,\s*如果\s*生成过\s*,\s*就不要再生成了\s*\.?\s*(切记\s*切记\s*,\s*因为要\s*保证\s*一致性\s*!)?/gi;
-        cleanPrompt = cleanPrompt.replace(suffixPattern, '');
-        cleanPrompt = cleanPrompt.replace(/[，,、]?\s*切记\s*切记\s*,\s*因为要\s*保证\s*一致性\s*!/gi, '');
-        cleanPrompt = cleanPrompt.trim().replace(/[，。,\.\s]+$/, '');
-        cleanPrompt = `${cleanPrompt}，只生成 1 张图片`;
 
         return `${cleanName}  :  ${cleanPrompt.trim()}`;
       };
@@ -621,19 +622,19 @@ ${existingStory}
         if (chars && Array.isArray(chars)) {
           parsedData.newElements.characters = chars.map((char: any) => ({
             ...char,
-            prompt: enforcePrefix(char.name, char.prompt, 'characters')
+            prompt: cleanElementPrompt(enforcePrefix(char.name, char.prompt, 'characters'))
           }));
         }
         if (scns && Array.isArray(scns)) {
           parsedData.newElements.scenes = scns.map((scene: any) => ({
             ...scene,
-            prompt: cleanImageRatio(enforcePrefix(scene.name, scene.prompt, 'scenes'))
+            prompt: cleanElementPrompt(enforcePrefix(scene.name, scene.prompt, 'scenes'))
           }));
         }
         if (prps && Array.isArray(prps)) {
           parsedData.newElements.props = prps.map((prop: any) => ({
             ...prop,
-            prompt: enforcePrefix(prop.name, prop.prompt, 'props')
+            prompt: cleanElementPrompt(enforcePrefix(prop.name, prop.prompt, 'props'))
           }));
         }
       }
@@ -642,7 +643,7 @@ ${existingStory}
       if (parsedData.shots && Array.isArray(parsedData.shots)) {
         parsedData.shots = parsedData.shots.map((shot: any) => ({
           ...shot,
-          prompt: enforceShotPromptTags(shot.prompt, parsedElements)
+          prompt: normalizeShotPrompt(enforceShotPromptTags(shot.prompt, parsedElements))
         }));
       }
 
@@ -842,11 +843,11 @@ ${videoPrompt || "无"}
 【生成要求】：
 1. 重新生成一个简洁、精准的提示词，只描写「生成该素材参考图」真正需要的信息（角色=外貌+服装；场景=环境构造+光影；道具=材质+形态）。严禁冗长形容词、动作叙事，以及与视频无关的姿势/场景描写（例如不要写"坐在驾驶座上握方向盘"这类只属于某一帧的动作）。
 2. 必须以该素材名称（例如：${name || 'R1_角色'}）开头，后面跟着两个空格、一个冒号、两个空格，然后是具体的提示词。
-   - 如果是角色，格式必须严格以：'${name || 'R1_角色'}  :  全身像，纯色背景，[简洁的外貌与服装描述]，图片比例 : 16:9，只生成 1 张图片' 的形式结尾。
-   - 如果是场景或道具，格式必须严格以：'${name || 'S1_场景'}  :  [简洁的描述]，图片比例 : 16:9，只生成 1 张图片' 的形式结尾。
+   - 如果是角色，格式示例：'${name || 'R1_角色'}  :  全身像，纯色背景，[简洁的外貌与服装描述]'
+   - 如果是场景或道具，格式示例：'${name || 'S1_场景'}  :  [简洁的描述]'
 3. 提示词必须用简体中文描写该角色的长相、衣着或者场景的具体构造、材质、光影氛围，保持精炼。
 4. 返回的内容必须直接是生成结果，不要有任何多余的话或 markdown 块引用包围。
-${userRequirements ? `\n【用户额外需求（务必重点满足）】：\n${userRequirements}\n` : ''}`;
+5. 不要在结尾添加"图片比例"或"只生成 X 张图片"之类的内容，这些由系统自动处理。${userRequirements ? `\n【用户额外需求（务必重点满足）】：\n${userRequirements}\n` : ''}`;
       } else if (type === 'shot') {
         systemInstruction = "你是一位顶级的电影导演和视频提示词专家。你的任务是为分镜头重新生成一个极致丰富、电影级、可直接交给 视频大模型的高水准【单镜头一镜到底】纯中文视频生成提示词。\n提示词只写纯视觉画面，不写台词、不写音效、不写绝对时间戳；台词与音效由系统从 dialogue/sfx 字段单独取用。";
         userPrompt = `
@@ -869,6 +870,7 @@ ${userRequirements ? `\n【用户额外需求（务必重点满足）】：\n${u
    - 具体起止秒数按本镜内容现编，不套固定模板；必须写满整个镜头时长（${shotContext?.duration || "00:00-00:10"}）。
 5. 【单切片固定语法（每段必写）】：「起-止秒 ｜ 景别 · 拍摄角度 · 镜头运动 ｜ 主体动作 ｜ 光效/细节」。景别/角度/运动三者每段必写缺一不可；光效/细节每段必写一句（丁达尔光、霓虹反射、衣角飘动、水面高光、烛光摇曳等）。
    - 示例：2-2.5秒 ｜ 近景 · 低角度仰拍 · 定住微抖 ｜ 林晚低头，指尖捏住银锁 ｜ 暮色冷光勾边
+   - **【强制换行 · 最重要】每一个切片必须【单独成行】，该切片的时间前缀必须位于【这一行的行首】；上一切片内容结束后必须【换行】再写下一切片的时间前缀。绝对禁止把下一个切片的时间戳接在上一切片内容末尾（错误：「…镀金边 1.5-3秒 ｜ 中全景…」必须改为上一句回车换行、新行以「1.5-3秒 ｜」开头）。**
 6. 【纯画面 + 连续性铁律】：提示词只写视觉画面，不写台词、不写音效、不写绝对时间戳。相邻切片姿态必须连续（上一段结尾 = 下一段开头），严禁人物瞬移、动作跳帧、景别硬切不连贯。禁止连续两段都是面部特写、禁止全程怼脸拍。
 7. 只要提及在 elements 中提炼的人物、场景、道具，必须 100% 严格使用带 @ 的完整名称格式（如 @R1_林薇, @S1_公寓大堂），引用前后各空 2 格，绝对不准写简写，也绝对不能使用人称代词指代！
 8. 返回的内容必须直接是生成的纯中文提示词，按上面「起-止秒 ｜ 景别 · 角度 · 运动 ｜ 动作 ｜ 光效」格式写满整个时长，不要有任何多余的解释、不要有 markdown 块引用包围。
@@ -928,15 +930,10 @@ ${userRequirements ? `\n【用户额外需求（务必重点满足）】：\n${u
       }
       
       resultText = resultText.replace(/^\s*```[a-zA-Z]*/m, "").replace(/```\s*$/m, "").trim();
-      // 去重「图片比例」片段（兼容全角/半角冒号与逗号，仅保留一个规范比例）
-      resultText = cleanImageRatio(resultText);
-      // 后置清洗：删尾巴块 + 删音效前时间前缀（支持相对时间 0-3秒 和 绝对时间 00:00 - 00:03）
-      resultText = resultText
-        .replace(/\[音效\s*\/\s*背景音乐[^\]]*\]/g, '')
-        .replace(/\d{2}:\d{2}\s*-\s*\d{2}:\d{2}\s+音效：/g, '音效：')
-        .replace(/\d+-\d+\s*秒\s*音效：/g, '音效：')
-        .replace(/\s{2,}/g, ' ')
-        .trim();
+      // 仅基本清洗，不做任何后缀补充（图片比例、张数等全由系统别的环节处理）
+      resultText = resultText.replace(/\s{2,}/g, ' ').trim();
+      // 强制按时间切片换行，保证每个 X-Y秒 位于行首
+      resultText = normalizeShotPrompt(resultText);
       res.json({ prompt: resultText });
     } catch (error: any) {
       console.error("Regenerate Prompt API Error:", error);
@@ -1101,6 +1098,60 @@ ${userRequirements ? `\n【用户额外需求（务必重点满足）】：\n${u
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     console.error('Unhandled Server Error:', err);
     res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
+  });
+
+  // 返回系统提示词文本（供用户复制到豆包）
+  app.get("/api/system-prompts", (req, res) => {
+    res.json({
+      elementPrompt: `你是一位专业的短剧视觉设定师。你的任务是为短剧中的一个素材（角色、场景或道具）重新生成一个极具画面感、高保真、电影级的静态图像生成提示词。
+
+【生成要求】：
+1. 重新生成一个简洁、精准的提示词，只描写「生成该素材参考图」真正需要的信息。
+2. 必须以该素材名称开头，后面跟着两个空格、一个冒号、两个空格，然后是具体的提示词。
+   - 如果是角色，格式示例：'R1_角色名  :  全身像，纯色背景，[简洁的外貌与服装描述]'
+   - 如果是场景或道具，格式示例：'S1_场景名  :  [简洁的描述]'
+3. 提示词必须用简体中文描写该角色的长相、衣着或者场景的具体构造、材质、光影氛围，保持精炼。
+4. 不要在结尾添加"图片比例"或"只生成 X 张图片"之类的内容，这些由系统自动处理。`,
+      shotPrompt: `你是一位顶级的电影导演和视频提示词专家。你的任务是为分镜头重新生成一个极致丰富、电影级、可直接交给视频大模型的高水准纯中文视频生成提示词。提示词只写纯视觉画面，不写台词、不写音效、不写绝对时间戳。
+
+【分镜视频提示词生成规范 - drama-skill】：
+## 一、动态时间轴分段
+根据动作强度切分每个 10 秒镜头的时间轴：平缓→2-3秒(远景/全景)，普通→1-2秒(中景)，关键微动作→0.5-1秒(近景/特写/低角度仰拍/高角度俯拍)
+
+## 二、单切片固定语法
+「起-止秒 ｜ 景别 · 拍摄角度 · 镜头运动 ｜ 主体动作 ｜ 光效/细节」
+- 每个切片单独成行，时间前缀在行首
+- 景别、角度、运动三者每段必写
+- 光效/细节每段必写一句
+- 复用素材引用：@Rxx/@Sxx/@Pxx 前后各空 2 格
+
+## 三、影视级词汇库
+景别：远景/全景/中景/中近景/近景/特写
+角度：平视/低角度仰拍/高角度俯拍/侧面拍/正面拍/过肩拍
+运动：缓慢推近/极慢后拉/横移跟拍/手持微抖/定住(静止)/环绕/升降/收尾定格
+
+## 四、连续性铁律：相邻切片姿态必须连续，严禁瞬移跳帧、景别硬切`,
+      fullMainPrompt: `如果你是一位专业的AI短剧编剧和导演。你的任务是生成完整的视频脚本和拆解。
+
+【核心素材提炼规则】：
+1. 只有「多次重复出现」的要素才提炼到 elements 中，过渡性场景直接写在分镜 prompt 里。
+2. 每个素材 prompt 必须简洁，只写参考图需要的信息。
+
+【JSON 返回格式】：
+{
+  "title": "...", "logline": "...", "story": "...",
+  "elements": { "characters": [...], "scenes": [...], "props": [...] },
+  "shots": [{"shotNumber":1,"episodeIndex":0,"duration":"00:00-00:10","camera":"...","action":"...","dialogue":"...","sfx":"...","materials":"@R1_...","prompt":"..."}]
+}
+
+【分镜提示词 drama-skill 规则】：
+## 一、动态分段：平缓2-3秒(远景)｜普通1-2秒(中景)｜关键0.5-1秒(近景/特写)
+## 二、切片语法：起-止秒 ｜ 景别·角度·运动 ｜ 动作 ｜ 光效/细节
+## 三、景别：远景/全景/中景/中近景/近景/特写
+## 四、角度：平视/低角度仰拍/高角度俯拍/侧面拍/正面拍/过肩拍
+## 五、运动：缓慢推近/极慢后拉/横移跟拍/手持微抖/定住/环绕/升降/收尾定格
+## 六、连续性：相邻切片姿态连续，严禁瞬移跳帧`
+    });
   });
 
   app.listen(PORT, "0.0.0.0", () => {
