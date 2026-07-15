@@ -247,8 +247,8 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
             model: "deepseek-chat",
             messages: [{ role: "user", content: promptText }],
             response_format: { type: "json_object" },
-            temperature: 0.7
-          })
+            temperature: 0.7,
+            max_tokens: 16384          }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
@@ -267,8 +267,8 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
           body: JSON.stringify({
             model: process.env.DOUBAO_MODEL_ENDPOINT,
             messages: [{ role: "user", content: promptText }],
-            temperature: 0.7
-          })
+            temperature: 0.7,
+            max_tokens: 16384          }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "Doubao API error");
@@ -399,6 +399,7 @@ camera 字段填写该镜头的总运镜概括，action 字段填核心动作，
         if (parsedData.shots && Array.isArray(parsedData.shots)) {
           parsedData.shots = parsedData.shots.map((shot: any) => ({
             ...shot,
+            duration: "00:00-00:10",
             prompt: normalizeShotPrompt(enforceShotPromptTags(shot.prompt, parsedElements))
           }));
         }
@@ -444,27 +445,26 @@ ${existingStory}
 
 【硬性任务与约束规则】：
 1. 生成新一集的故事总结文本 (storyParagraph) 必须是简体中文。
-2. 生成新一集的分镜头列表 (shots)。每个镜头的 shotNumber 从 1 开始，并且每个镜头的 episodeIndex 必须是新集数的索引 (即 ${currentEpisodeCount})。
+2. 生成新一集的分镜头列表 (shots)。每个镜头的 shotNumber 从 1 开始，并且每个镜头的 episodeIndex 必须是新集数的索引 (即 ${currentEpisodeCount})。每集大约 10 个分镜。
 3. 【极重要：分镜视频提示词（prompt）生成规范 - 动态分段 + 智能景别角度控制】：
-   - 核心语言：必须 100% 使用高质量、高画质的纯简体中文！绝对禁止生成、夹杂任何英文段落、英文翻译、英文绘画提示词（如 [English Prompt: ...] 等）！就中文就够了！
-   - 【动态时间轴分段（绝对禁止固定/均匀切分）】：
-     - 根据"动作强度"自行切分每个镜头的秒数，**严禁**使用 0-0.5/0.5-1 这种均匀网格，也**严禁**使用 0-3/3-6/6-10 这种大段（画面感太差）。
-     - 分段长度 = 该时间段内动作强度的函数：平缓交代/空镜/过渡 → 2–3 秒长拍（配 远景/全景/侧拍）；普通表演 → 1–2 秒（配 中景/中近景）；关键微动作/情绪转折/高光 → 0.5–1 秒短拍（配 近景/特写/低角度仰拍/高角度俯拍）。
-     - 具体起止秒数由你按该镜实际内容现编，**不要套固定模板**（例：0-2/2-2.5/2.5-5/5-6/6-8/8-8.5/8.5-10 仅为示例，非固定序列）。
-   - 【单切片固定语法（每段必写）】：「起-止秒 ｜ 景别 · 拍摄角度 · 镜头运动 ｜ 主体动作 ｜ 光效/细节」。景别/角度/运动三者每段必写缺一不可；光效/细节每段必写一句（丁达尔光、霓虹反射、衣角飘动、水面高光、烛光摇曳等）。示例：2-2.5秒 ｜ 近景 · 低角度仰拍 · 定住微抖 ｜ 林晚低头，指尖捏住银锁 ｜ 暮色冷光勾边
-   - **【强制换行 · 最重要】每一个切片必须【单独成行】，该切片的时间前缀必须位于【这一行的行首】；上一切片内容结束后必须换行再写下一切片的时间前缀。绝对禁止把下一个切片的时间戳接在上一切片内容末尾（例如错误：「…镀金边 1.5-3秒 ｜ 中全景…」必须改为上一句回车换行、新行以「1.5-3秒 ｜」开头）。**
-   - 【纯画面 + 连续性铁律】：prompt 字段只写视觉画面，不写台词、不写音效、不写绝对时间戳（00:10-00:20）。台词填到 dialogue 字段，音效填到 sfx 字段。相邻切片姿态必须连续（上一段结尾 = 下一段开头），严禁人物瞬移、动作跳帧、景别硬切不连贯。
-   - 【素材一致性 @ 完整名称】：
-     - 只要提及已有元素（角色、场景、道具），必须 100% 以带 @ 的完整名称格式出现（例如 @R1_林薇、@S1_深夜荒河滩）。
-     - 如果用户提供了新的角色、场景或道具，且这些元素在后续会多次重复使用，请将它们提炼到返回值中的 \`newElements\` 字段中。如果是只出现一次的、过渡性的场景/道具，绝对不要提炼，直接写在分镜头的 prompt 中即可。
-4. 返回的内容必须严格符合JSON格式，包含：
+   - 核心语言：必须 100% 使用高质量、高画质的纯简体中文！绝对禁止生成、夹杂任何英文段落、英文翻译、英文绘画提示词！
+   - 【每个分镜固定 10 秒，内部动态时间轴从 0 秒开始，**严禁均匀切分**】：
+     - 每个分镜（shot）的 duration 字段固定为 "00:00-00:10"。
+     - 分镜内部的 prompt 动态时间轴永远从 0 秒开始，绝对不能从任何其他秒数开始。
+     - 根据"动作强度"切分 0-10 秒：**绝对禁止**使用 0-2/2-4/4-6/6-8/8-10 这种均匀网格，也禁止使用 0-3/3-6/6-10 这种大段（画面感太差）。
+     - 正确的示例（长短不一）：0-2秒 ｜ 远景 …  2-2.5秒 ｜ 近景 …  2.5-5秒 ｜ 中景 …  5-6秒 ｜ 特写 …  6-8秒 ｜ 中近景 …  8-8.5秒 ｜ 近景 …  8.5-10秒 ｜ 远景（每个切片长度按动作强度智能变化，0.5秒/1秒/1.5秒/2秒/3秒混搭）。
+   - 【单切片固定语法（每段必写）】：「起-止秒 ｜ 景别 · 拍摄角度 · 镜头运动 ｜ 主体动作 ｜ 光效/细节」。景别/角度/运动三者每段必写缺一不可；光效/细节每段必写一句。示例：0-2秒 ｜ 远景 · 平视 · 缓慢横移 ｜ 林辰坐在床边 ｜ 室内昏暗，手机屏幕光照亮
+   - **【强制换行 · 最重要】每一个切片必须【单独成行】，该切片的时间前缀必须位于【这一行的行首】。禁止把时间戳接在上一行末尾。**
+   - 【纯画面 + 连续性铁律】：prompt 只写视觉，不写台词不写音效不写绝对时间戳（00:10-00:20）。台词→dialogue，音效→sfx。相邻切片姿态必须连续。
+   - 【素材一致性 @ 完整名称】：提及已有元素用 @ 完整名称格式。新元素提炼到 newElements。一次性元素直接写在 prompt 中。
+4. 返回 JSON 格式：
    {
      "storyParagraph": "新一集的故事总结内容，不少于 150 字",
      "shots": [
        {
          "shotNumber": 1,
          "episodeIndex": ${currentEpisodeCount},
-         "duration": "该镜头的时间范围，例如：00:00-00:05，时长根据内容自然变化，禁止统一固定秒数",
+         "duration": "00:00-00:10",
          "camera": "电影级、极具高级感的连续多阶段镜头运动和机位",
          "action": "镜头中发生的具体连续动作 and 微表情变化",
          "dialogue": "角色名称：台词（如果有）",
@@ -497,8 +497,8 @@ ${existingStory}
             model: "deepseek-chat",
             messages: [{ role: "user", content: promptText }],
             response_format: { type: "json_object" },
-            temperature: 0.7
-          })
+            temperature: 0.7,
+            max_tokens: 16384          }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
@@ -517,8 +517,8 @@ ${existingStory}
           body: JSON.stringify({
             model: process.env.DOUBAO_MODEL_ENDPOINT,
             messages: [{ role: "user", content: promptText }],
-            temperature: 0.7
-          })
+            temperature: 0.7,
+            max_tokens: 16384          }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "Doubao API error");
@@ -643,6 +643,8 @@ ${existingStory}
       if (parsedData.shots && Array.isArray(parsedData.shots)) {
         parsedData.shots = parsedData.shots.map((shot: any) => ({
           ...shot,
+          duration: "00:00-00:10",
+          episodeIndex: shot.episodeIndex !== undefined ? shot.episodeIndex : currentEpisodeCount,
           prompt: normalizeShotPrompt(enforceShotPromptTags(shot.prompt, parsedElements))
         }));
       }
@@ -652,6 +654,177 @@ ${existingStory}
     } catch (error: any) {
       console.error("API Continuation Error:", error);
       res.status(500).json({ error: error.message || "Failed to continue script" });
+    }
+  });
+
+  // ===== 批量生成所有集数的分镜 =====
+  app.post("/api/batch-generate-shots", async (req, res) => {
+    try {
+      const { scriptId, provider } = req.body;
+      if (!scriptId) return res.status(400).json({ error: "scriptId required" });
+
+      const scripts = readJSON('scripts.json') || [];
+      const script = scripts.find((s: any) => s.id === scriptId);
+      if (!script) return res.status(404).json({ error: "Script not found" });
+
+      const paragraphs = (script.story || '').split('\n').map((p: string) => p.trim()).filter(Boolean);
+      if (paragraphs.length === 0) return res.status(400).json({ error: "No story paragraphs found" });
+
+      // 收集已有分镜的集数
+      const existingEpisodes = new Set(script.shots.map((s: any) => s.episodeIndex));
+      const missingEpisodes: number[] = [];
+      for (let i = 0; i < paragraphs.length; i++) {
+        if (!existingEpisodes.has(i)) missingEpisodes.push(i);
+      }
+
+      if (missingEpisodes.length === 0) {
+        return res.json({ message: "所有集数已有分镜，无需生成", updatedScript: script });
+      }
+
+      const elements = script.elements || { characters: [], scenes: [], props: [] };
+      const MAX_CONCURRENT = 3;
+      const results: { episodeIndex: number; storyParagraph: string; shots: any[]; newElements: any }[] = [];
+
+      for (let batch = 0; batch < missingEpisodes.length; batch += MAX_CONCURRENT) {
+        const batchEpisodes = missingEpisodes.slice(batch, batch + MAX_CONCURRENT);
+        const batchPromises = batchEpisodes.map(async (epIdx) => {
+          const existingStoryUpToNow = paragraphs.slice(0, epIdx).join('\n\n');
+          const paragraph = paragraphs[epIdx];
+          const continuationPrompt = `当前本集的故事大纲是：“${paragraph}”。请根据以上信息和前文发展，生成第 ${epIdx + 1} 集的详细分镜头脚本。`;
+
+          let promptText = `
+你是一个顶级的AI短剧编剧和导演。
+现在你需要为一部已有的短剧【增加新的一集】（第 ${epIdx + 1} 集）。
+
+这部短剧已有的故事内容如下：
+${existingStoryUpToNow}
+
+当前短剧已有核心素材元素：
+角色: ${JSON.stringify(elements.characters || [])}
+场景: ${JSON.stringify(elements.scenes || [])}
+道具: ${JSON.stringify(elements.props || [])}
+
+用户对于新一集的要求: ${continuationPrompt}
+
+【硬性任务与约束规则】：
+1. 生成新一集的故事总结文本 (storyParagraph) 必须是简体中文。
+2. 生成新一集的分镜头列表 (shots)。每个镜头的 shotNumber 从 1 开始，并且每个镜头的 episodeIndex 必须是新集数的索引 (即 ${epIdx})。大约生成 10 个分镜。
+3. 【极重要：分镜视频提示词（prompt）生成规范 - 动态分段 + 智能景别角度控制】：
+   - 核心语言：必须 100% 使用高质量、高画质的纯简体中文！
+   - 【每个分镜固定 10 秒，内部动态时间轴从 0 秒开始，**严禁均匀切分**】：
+     - 每个分镜（shot）的 duration 字段固定为 "00:00-00:10"。
+     - 分镜内部的 prompt 动态时间轴永远从 0 秒开始，绝对不能从任何其他秒数开始。
+     - **绝对禁止**使用 0-2/2-4/4-6/6-8/8-10 这种均匀网格。
+     - 正确的示例：0-2秒 ｜ 远景 …  2-2.5秒 ｜ 近景 …  2.5-5秒 ｜ 中景 …  5-6秒 ｜ 特写 …  6-8秒 ｜ 中近景 …  8-8.5秒 ｜ 近景 …  8.5-10秒 ｜ 远景（每段时长按动作强度智能变化，不相等）。
+   - 【强制换行】每一个切片必须单独成行，时间前缀在行首。
+   - 【纯画面 + 连续性铁律】：prompt 只写视觉，不写台词音效时间戳。相邻切片姿态连续。
+   - 【素材一致性 @ 完整名称】：提及已有元素用 @ 完整名称格式。
+4. 返回 JSON 格式：
+   {
+     "storyParagraph": "新一集的故事总结内容",
+     "shots": [
+       {
+         "shotNumber": 1,
+         "episodeIndex": ${epIdx},
+         "duration": "00:00-00:10",
+         "camera": "镜头运动描述",
+         "action": "动作描述",
+         "dialogue": "台词",
+         "sfx": "音效",
+         "materials": "@R1_xxx @S1_xxx",
+         "prompt": "电影级纯中文视频提示词"
+       }
+     ],
+     "newElements": { "characters": [], "scenes": [], "props": [] }
+   }`;
+
+          const deepseekResp = await fetch("https://api.deepseek.com/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`
+            },
+            body: JSON.stringify({
+              model: "deepseek-chat",
+              messages: [{ role: "user", content: promptText }],
+              response_format: { type: "json_object" },
+              temperature: 0.7,
+              max_tokens: 16384
+            })
+          });
+          const deepseekData = await deepseekResp.json();
+          if (!deepseekResp.ok) throw new Error(deepseekData.error?.message || "DeepSeek API error");
+          const jsonText = deepseekData.choices[0].message.content;
+          const parsedData = safeParseJson(jsonText);
+          if (!parsedData) throw new Error("AI 返回了无法解析的 JSON");
+
+          return {
+            episodeIndex: epIdx,
+            storyParagraph: parsedData.storyParagraph || paragraph,
+            shots: Array.isArray(parsedData.shots) ? parsedData.shots.map((s: any) => ({
+              ...s,
+              duration: "00:00-00:10",
+              episodeIndex: epIdx
+            })) : [],
+            newElements: parsedData.newElements || { characters: [], scenes: [], props: [] }
+          };
+        });
+
+        const batchResults = await Promise.allSettled(batchPromises);
+        for (const result of batchResults) {
+          if (result.status === 'fulfilled') {
+            results.push(result.value);
+          } else {
+            console.error("Batch episode generation error:", result.reason);
+          }
+        }
+
+        // 每批保存一次进度
+        if (batchResults.some(r => r.status === 'fulfilled')) {
+          const updatedParagraphs = [...paragraphs];
+          for (const r of results) {
+            if (r.storyParagraph) updatedParagraphs[r.episodeIndex] = r.storyParagraph;
+          }
+          script.story = updatedParagraphs.join('\n');
+
+          const newElements = { characters: [...elements.characters], scenes: [...elements.scenes], props: [...elements.props] };
+          for (const r of results) {
+            if (r.newElements) {
+              for (const key of ['characters', 'scenes', 'props'] as const) {
+                if (Array.isArray(r.newElements[key])) {
+                  for (const item of r.newElements[key]) {
+                    if (!newElements[key].find((x: any) => x.name === item.name)) {
+                      newElements[key].push(item);
+                    }
+                  }
+                }
+              }
+            }
+          }
+          script.elements = newElements;
+
+          const existingShots = script.shots.filter((s: any) => !missingEpisodes.includes(s.episodeIndex));
+          const newShots: any[] = [];
+          for (const r of results) {
+            if (r.shots.length > 0) newShots.push(...r.shots);
+          }
+          script.shots = [...existingShots, ...newShots].sort((a: any, b: any) => {
+            if (a.episodeIndex !== b.episodeIndex) return a.episodeIndex - b.episodeIndex;
+            return a.shotNumber - b.shotNumber;
+          });
+
+          writeJSON('scripts.json', scripts);
+        }
+      }
+
+      res.json({
+        message: `已为 ${results.length} 集生成分镜（共 ${results.reduce((s, r) => s + r.shots.length, 0)} 个镜头）`,
+        updatedScript: script
+      });
+
+    } catch (error: any) {
+      console.error("Batch generate error:", error);
+      res.status(500).json({ error: error.message || "Failed to batch generate shots" });
     }
   });
 
@@ -696,8 +869,8 @@ ${existingStory}
           body: JSON.stringify({
             model: "deepseek-chat",
             messages: [{ role: "user", content: promptText }],
-            temperature: 0.7
-          })
+            temperature: 0.7,
+            max_tokens: 16384          }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
@@ -715,8 +888,8 @@ ${existingStory}
           body: JSON.stringify({
             model: process.env.DOUBAO_MODEL_ENDPOINT,
             messages: [{ role: "user", content: promptText }],
-            temperature: 0.7
-          })
+            temperature: 0.7,
+            max_tokens: 16384          }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "Doubao API error");
@@ -777,7 +950,8 @@ ${videoPrompt || "无"}
           body: JSON.stringify({
             model: "deepseek-chat",
             messages: [{ role: "user", content: promptText }],
-            temperature: 0.7
+            temperature: 0.7,
+            max_tokens: 16384
           })
         });
         const data = await response.json();
@@ -796,8 +970,8 @@ ${videoPrompt || "无"}
           body: JSON.stringify({
             model: process.env.DOUBAO_MODEL_ENDPOINT,
             messages: [{ role: "user", content: promptText }],
-            temperature: 0.7
-          })
+            temperature: 0.7,
+            max_tokens: 16384          }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "Doubao API error");
@@ -897,8 +1071,8 @@ ${videoPrompt || "无"}
               { role: "system", content: systemInstruction },
               { role: "user", content: userPrompt }
             ],
-            temperature: 0.4
-          })
+            temperature: 0.4,
+            max_tokens: 16384          }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
@@ -919,8 +1093,8 @@ ${videoPrompt || "无"}
               { role: "system", content: systemInstruction },
               { role: "user", content: userPrompt }
             ],
-            temperature: 0.4
-          })
+            temperature: 0.4,
+            max_tokens: 16384          }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "Doubao API error");
@@ -1008,7 +1182,7 @@ ${videoPrompt || "无"}
         const response = await fetch("https://api.deepseek.com/chat/completions", {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}` },
-          body: JSON.stringify({ model: "deepseek-chat", messages, temperature: 0.4 })
+          body: JSON.stringify({ model: "deepseek-chat", messages, temperature: 0.4, max_tokens: 8192 })
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "DeepSeek API error");
@@ -1018,7 +1192,7 @@ ${videoPrompt || "无"}
         const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.DOUBAO_API_KEY}` },
-          body: JSON.stringify({ model: process.env.DOUBAO_MODEL_ENDPOINT, messages, temperature: 0.4 })
+          body: JSON.stringify({ model: process.env.DOUBAO_MODEL_ENDPOINT, messages, temperature: 0.4, max_tokens: 8192 })
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error?.message || "Doubao API error");

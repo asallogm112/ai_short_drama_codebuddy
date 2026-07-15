@@ -31,6 +31,9 @@ export interface Shot {
   episodeIndex?: number;
   videoUrl?: string;
   keyframes?: string[]; // 4 keyframe images
+  keyframePrompts?: string[];
+  lastFrameUrl?: string;
+  originalIndex?: number;
 }
 
 export interface ScriptData {
@@ -49,6 +52,10 @@ export interface SavedScript extends ScriptData {
   id: string;
   createdAt: number;
   originalPrompt?: string;
+  mergedVideos?: Record<number, string>;
+  mergedVideo?: string;
+  episodeTimeline?: string[];
+  [key: string]: any; // 允许扩展字段
 }
 
 // 全局「素材库」：跨剧本保存的素材（角色/场景/道具）图片与提示词

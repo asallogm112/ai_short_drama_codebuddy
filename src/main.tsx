@@ -10,7 +10,7 @@ class ErrorBoundary extends Component<{children: ReactNode}, {error: Error | nul
     if (this.state.error) {
       return <div style={{padding:40,fontFamily:'monospace',fontSize:14,color:'#e00',whiteSpace:'pre-wrap'}}>{this.state.error.stack}</div>;
     }
-    return this.props.children;
+    return (this as any).props.children;
   }
 }
 

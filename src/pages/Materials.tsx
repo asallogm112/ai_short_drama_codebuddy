@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import { Library, Search, Copy, Trash2, Image as ImageIcon, Users, MapPin, Box, Filter, Plus, X, Upload } from 'lucide-react';
 import { useMaterials } from '../hooks/useMaterials';

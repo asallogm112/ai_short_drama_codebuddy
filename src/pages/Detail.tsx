@@ -28,6 +28,7 @@ import {
   Download,
   Play,
   BookmarkPlus,
+  Wand2,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -955,7 +956,7 @@ export function Detail() {
     if (!script) return;
     let dirty = false;
     const types: Array<'characters' | 'scenes' | 'props'> = ['characters', 'scenes', 'props'];
-    const newElements = { ...(script.elements || {}) };
+    const newElements = { characters: [...(script.elements?.characters || [])], scenes: [...(script.elements?.scenes || [])], props: [...(script.elements?.props || [])] };
     for (const type of types) {
       const list = newElements[type];
       if (!list || !Array.isArray(list)) continue;
@@ -1096,6 +1097,8 @@ export function Detail() {
   const [isImportShotsOpen, setIsImportShotsOpen] = useState(false);
   const [importText, setImportText] = useState('');
   const [importError, setImportError] = useState<string | null>(null);
+  // 批量生���全部分镜状态
+  const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [deletingShotIndex, setDeletingShotIndex] = useState<number | null>(null);
   const [addShotAfterIndex, setAddShotAfterIndex] = useState<number | null>(null);
   const [addShotText, setAddShotText] = useState('');
@@ -1484,6 +1487,29 @@ export function Detail() {
       showToast(`生成分镜失败: ${err.message || err}`);
     }
     setGeneratingShotsEp(null);
+  };
+
+  // 一键生成所有集数的分镜
+  const handleBatchGenerateShots = async () => {
+    if (!script?.id || isBatchGenerating) return;
+    setIsBatchGenerating(true);
+    showToast('正在逐集生成全部分镜头，请耐心等候...');
+    try {
+      const response = await fetch('/api/batch-generate-shots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scriptId: script.id, provider: createEpProvider })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '批量生成失败');
+      if (data.updatedScript) {
+        updateScript(script.id, data.updatedScript);
+      }
+      showToast(data.message || '全部分镜生成完成');
+    } catch (err: any) {
+      showToast(`批量生成失败: ${err.message || err}`);
+    }
+    setIsBatchGenerating(false);
   };
 
   const toggleShotsEpisode = (index: number) => {
@@ -2882,7 +2908,7 @@ export function Detail() {
                       onSave={(newVal) => {
                         handleSaveElementPrompt('characters', i, newVal);
                       }}
-                      onRegenerate={() => {
+                      onRegenerate={async () => {
                         setRegenerateElementItem({ type: 'characters', index: i, name: char.name, description: char.description, prompt: char.prompt });
                         setRegenerateElementReq('');
                         setRegenerateElementError(null);
@@ -2969,7 +2995,7 @@ export function Detail() {
                         handleSaveElementPrompt('scenes', i, newVal);
                       }}
 
-                      onRegenerate={() => {
+                      onRegenerate={async () => {
                         setRegenerateElementItem({ type: 'scenes', index: i, name: scene.name, description: scene.description, prompt: scene.prompt });
                         setRegenerateElementReq('');
                         setRegenerateElementError(null);
@@ -3057,7 +3083,7 @@ export function Detail() {
                         handleSaveElementPrompt('props', i, newVal);
                       }}
 
-                        onRegenerate={() => {
+                        onRegenerate={async () => {
                           setRegenerateElementItem({ type: 'props', index: i, name: prop.name, description: prop.description, prompt: prop.prompt });
                           setRegenerateElementReq('');
                           setRegenerateElementError(null);
@@ -3101,14 +3127,25 @@ export function Detail() {
                   <h3 className="text-xl font-bold text-neutral-900">视频分镜头列表</h3>
                   <span className="text-sm text-neutral-500">{script.shots.length} 个镜头</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => { setImportText(''); setImportError(null); setIsImportShotsOpen(true); }}
-                  className="flex items-center space-x-1 text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-600 font-semibold px-3 py-1.5 rounded-lg transition-colors"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>导入分镜列表</span>
-                </button>
+                <div className="flex items-center space-x-2">
+                  <button
+                    type="button"
+                    onClick={handleBatchGenerateShots}
+                    disabled={isBatchGenerating}
+                    className="flex items-center space-x-1 text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-600 font-semibold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isBatchGenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                    <span>{isBatchGenerating ? '生成中...' : '一键生成全部分镜'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setImportText(''); setImportError(null); setIsImportShotsOpen(true); }}
+                    className="flex items-center space-x-1 text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-600 font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>导入分镜列表</span>
+                  </button>
+                </div>
               </div>
 
               <div className="space-y-4">
@@ -4694,7 +4731,7 @@ export function Detail() {
 
       {/* 全屏视频/图片弹窗 */}
       {fullscreenVideo && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => { setFullscreenVideo(null); setFullscreenTime(0); }}>
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => { setFullscreenVideo(null); }}>
           <div className="relative w-full max-w-5xl flex flex-col items-center" onClick={e => e.stopPropagation()}>
             <button
               type="button"
