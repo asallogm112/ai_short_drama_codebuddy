@@ -833,25 +833,22 @@ ${existingStoryUpToNow}
     try {
       const { shotPrompt, timeInfo, materials, camera, action, dialogue, provider = 'deepseek' } = req.body;
       const promptText = `
-你是一位专业的电影视觉设计大导演。
 我需要你根据一个视频分镜头的描述和其对应的具体时间点，为其中一个"关键帧"单独设计一张极致精细、电影质感的"图片生成提示词"（用于 Midjourney, FLUX 或 DALL-E 3 生成）。
 
 分镜头基础设定：
 - 完整镜头的视频生成提示词: ${shotPrompt || "无"}
 - 镜头的机位运镜设计: ${camera || "无"}
-- 镜头的具体动作和微表情变化: ${action || "无"}
-- 镜头的台词: ${dialogue || "无"}
-- 镜头的出场素材标签: ${materials || "无"}
-
+- 镜头中发生的连续动作: ${action || "无"}
+- 镜头中的对白台词: ${dialogue || "无"}
+- 镜头中出现的素材：${materials || "无"}
 当前需要生成的关键帧图片代表该镜头的这个瞬间：
 - 关键帧所在时间点: ${timeInfo}
 
 【生成设计要求】：
-1. 你的任务是专门针对这个特定的瞬间 (${timeInfo}) 生成一个高保真的静态画面描述，这个画面是整个连续动态镜头中的一个精彩切片。必须 100% 使用纯简体中文，绝对禁止生成或夹杂任何英文段落或英文绘画提示词（English Prompt/Midjourney Prompt）。
-2. 保持与分镜头的角色、场景、道具设定 100% 视觉一致。因此，凡是涉及到角色（如 @R1_林薇）、场景（如 @S1_古旧茶馆）、道具（如 @P1_白色纸条）等元素，你必须在提示词中 100% 保留其完整的带 @ 的名称格式。
-3. 提示词必须详细描写该瞬间的静态特征：包括特定的姿势、具体面部表情、眼神聚焦、手部动作、那一瞬间的光线投影方向、空气中飘浮的微尘状态、以及写实、电影级体积光、35毫米镜头、胶片颗粒感、冷色调等高画质画面质感和相机参数描述。
-4. 返回格式必须是：'[纯中文核心视觉画面与高画质细节描述]'。绝对禁止包含任何英文！
-5. 在末尾自动包含 "，图片比例 : 16:9，只生成 1 张图片"。
+1. 你的任务是专门针对这个特定的瞬间 (${timeInfo}) 生成一个高保真的静态画面描述。
+2. 必须使用 100% 纯简体中文。
+3. 保留角色/场景/道具的 @ 完整名称格式。
+4. 末尾自动包含 "，图片比例 : 16:9，只生成 1 张图片"。
 `;
 
       let resultText = "";
@@ -906,33 +903,38 @@ ${existingStoryUpToNow}
     }
   });
 
-  // Extract Keyframe Prompts from Video Prompt
-  app.post("/api/extract-keyframe-prompts", async (req, res) => {
+  // ===== 生成分镜九宫格提示词 =====
+  app.post("/api/generate-nine-grid", async (req, res) => {
     try {
-      const { videoPrompt, provider = 'deepseek' } = req.body;
+      const { shotPrompt, camera, action, dialogue, sfx, materials, duration, provider = 'deepseek' } = req.body;
       const promptText = `
 你是一位顶级的电影视觉导演与AI绘画专家。
-我现在给你提供一个"视频生成提示词"（Video Generation Prompt），该提示词描述了一个镜头（Shot）的完整动态过程。它可能采用以下两种分段写法之一：\n写法A（带方括号时间戳）：【00:00-00:03】描述A，【00:03-00:06】描述B... \n写法B（动态分段竖线格式）：0-2秒 ｜ 远景 · 平视 · 缓慢横移 ｜ 主体动作 ｜ 光效细节；2-2.5秒 ｜ 近景 · 低角度仰拍 · 定住微抖 ｜ 动作 ｜ 光效... \n无论哪种写法，都按真实时间顺序解析其中的时间片段与画面。
+现在你需要为一个【10秒分镜头】生成【九宫格分镜图】的提示词。
 
-你的任务是：仔细分析这段"视频生成提示词"，将其中连续的动态过程拆分并提取出对应的"静态关键帧图片提示词"（最多4张，通常每个明显的时间段或视觉变化生成一张）。
+九宫格固定布局（3行x3列），每格镜头类型固定：
+row1(起):1远景 2中景 3特写
+row2(承):4过肩 5主角近景 6反应
+row3(转合):7仰拍 8主观/POV 9收尾
 
-分镜头完整视频提示词内容：
-${videoPrompt || "无"}
+【分镜头原始信息】：
+- 视频提示词: ${shotPrompt || "无"}
+- 运镜/机位: ${camera || "无"}
+- 动作: ${action || "无"}
+- 台词: ${dialogue || "无"}
+- 音效: ${sfx || "无"}
+- 素材: ${materials || "无"}
+- 时长: ${duration || "00:00-00:10"}
 
-【提取与生成设计要求】：
-1. 分析：提取出视频中所有明显的时间阶段或关键动作节点。分段可能用【00:00-00:03】方括号时间戳，也可能用「起-止秒 ｜ 景别 · 角度 · 运动 ｜ 动作 ｜ 光效」竖线格式。无论哪种，都为每一个时间片段提取出对应的精彩切片画面（竖线格式里「动作」和「光效」部分就是该片段的画面依据）。
-2. 数量：生成 1 到 4 个关键帧提示词（不要强行拼凑 4 个，必须根据视频提示词的实际结构，有几个明显的节点或时间段就提取几个，最多不超过4个）。
-3. 视觉一致性：保持与原提示词的角色、场景、道具设定 100% 视觉一致。因此，凡是涉及到角色（如 @R1_谢老太）、场景（如 @S1_深夜荒河滩）、道具（如 @P2_xxx）等元素，你必须在生成的关键帧提示词中 100% 保留其完整的带 @ 的名称格式。
-4. 内容与返回格式要求：必须 100% 使用纯简体中文描述，绝对禁止夹杂或生成英文段落/英文绘画提示词！每个关键帧提示词必须按照：'【时间段】[纯中文核心视觉画面与高画质细节、机位、电影光影、相机参数与胶片质感描述]' 格式进行设计，以便 AI 绘图模型能够完美生成。
-5. 尾缀适配：为了适配系统格式，在每个生成的提示词文本末尾自动包含："，图片比例 : 16:9，只生成 1 张图片"。
-6. 返回格式：你必须返回一个合法的 JSON 数组，数组中包含 1 到 4 个字符串元素，每个元素对应一个提取生成的关键帧提示词。
-请直接返回 JSON 数组，不要包含任何 \`\`\`json 或 \`\`\` 标记，不要有任何 Markdown 包裹，不要有任何多余的汉字解释 or 说明。
-
-示例返回格式：
-[
-  "【00:00-00:03】特写，@R1_谢老太 枯皱的手紧紧攥着洗衣服的灰布，指节发力凸显拉紧，水花从指缝间飞溅，冷色调，胶片颗粒质感，电影级微距，极高画质。，图片比例 : 16:9，只生成 1 张图片",
-  "【00:03-00:06】中景，@R1_谢老太 弓背站在 @S1_深夜荒河滩 上，神情凝重地望着平静的河面，月光冷清，薄雾缭绕，电影级体积光，写实，35毫米镜头。，图片比例 : 16:9，只生成 1 张图片"
-]
+【硬性要求】：
+1. 将10秒内容按动作节奏分配到9格，每格是一个【静态帧】，用于文生图生成后拼成九宫格参考图。
+2. 每格格式：【景别.角度】主体静态姿势 | 光效/细节 | 画面氛围关键词
+   — 只写静态画面，禁止写运镜（推拉摇移跟）、禁止写时间戳（起止秒）、禁止写转场（硬切/融合）、禁止写台词、禁止写音效。
+   — 正确示例：【远景.平视】@R1_林辰坐在电脑前，屏幕蓝光映在脸上，眼神疲惫 | 背景墙纸剥落，台灯昏黄 | 冷色调，孤独感
+3. 涉及角色/场景/道具必须用 @ 完整名称（如 @R1_林辰、@S1_古代市井）。
+4. 相邻格子间人物的姿态/位置保持连续（上一格结尾姿势 = 下一格开头姿势）。
+5. 返回9个提示词，按格子1到9的顺序（从左到右、从上到下）。
+6. 每个提示词末尾自动包含"，图片比例:16:9，只生成1张图片"。
+返回 JSON 数组，9个字符串元素。
 `;
 
       let resultText = "";
@@ -982,19 +984,22 @@ ${videoPrompt || "无"}
 
       try {
         const parsed = safeParseJson(resultText);
-        const prompts = Array.isArray(parsed) ? parsed : [parsed];
-        res.json({ prompts });
+        let prompts: string[] = [];
+        if (Array.isArray(parsed)) {
+          prompts = parsed;
+        } else if (typeof parsed === 'object' && parsed.prompts) {
+          prompts = Array.isArray(parsed.prompts) ? parsed.prompts : [];
+        } else if (typeof parsed === 'object') {
+          prompts = Object.values(parsed).filter(v => typeof v === 'string');
+        }
+        res.json({ prompts: prompts.slice(0, 9) });
       } catch (parseError) {
-        console.error("Failed to parse extracted keyframe JSON. Text was:", resultText);
-        const fallbackPrompts = resultText
-          .split('\n')
-          .map(line => line.trim())
-          .filter(line => line.length > 5 && !line.startsWith('[') && !line.startsWith(']'));
-        res.json({ prompts: fallbackPrompts.slice(0, 4) });
+        console.error("Failed to parse nine-grid JSON. Text was:", resultText);
+        res.json({ prompts: [] });
       }
     } catch (error: any) {
-      console.error("Extract Keyframe Prompts Error:", error);
-      res.status(500).json({ error: error.message || "Failed to extract keyframe prompts" });
+      console.error("Generate Nine-Grid Error:", error);
+      res.status(500).json({ error: error.message || "Failed to generate nine-grid" });
     }
   });
 

@@ -1530,6 +1530,8 @@ export function Detail() {
   }
   const [keyframeModal, setKeyframeModal] = useState<KeyframeModalState | null>(null);
   const [generatingKeyframes, setGeneratingKeyframes] = useState<Record<string, boolean>>({});
+  // 本地九宫格提示词缓存（生成后立即更新，不依赖 context，保证按钮立即出现）
+  const [localGridPrompts, setLocalGridPrompts] = useState<Record<number, string[]>>({});
 
   const [editingShotIndex, setEditingShotIndex] = useState<number | null>(null);
   const [editingShotText, setEditingShotText] = useState<string>('');
@@ -1606,7 +1608,7 @@ export function Detail() {
       
       // Save
       const newShots = [...script.shots];
-      const currentPrompts = [...(newShots[shotOriginalIndex].keyframePrompts || ['', '', '', ''])];
+      const currentPrompts = [...(newShots[shotOriginalIndex].keyframePrompts || Array(9).fill(''))];
       currentPrompts[kfIdx] = generatedPrompt;
       newShots[shotOriginalIndex] = {
         ...newShots[shotOriginalIndex],
@@ -1681,7 +1683,7 @@ export function Detail() {
       const generatedPrompt = data.prompt || "";
       
       const newShots = [...script.shots];
-      const currentPrompts = [...(newShots[shotOriginalIndex].keyframePrompts || ['', '', '', ''])];
+      const currentPrompts = [...(newShots[shotOriginalIndex].keyframePrompts || Array(9).fill(''))];
       currentPrompts[kfIdx] = generatedPrompt;
       newShots[shotOriginalIndex] = {
         ...newShots[shotOriginalIndex],
@@ -1709,55 +1711,63 @@ export function Detail() {
     }
   };
 
-  const handleAIExtractKeyframes = async (shotOriginalIndex: number, shotItem: any) => {
+  const handleGenerateNineGrid = async (shotOriginalIndex: number, shotItem: any) => {
     if (!script) return;
-    const key = `extracting_${shotOriginalIndex}`;
+    const key = `generating_${shotOriginalIndex}`;
     setGeneratingKeyframes(prev => ({ ...prev, [key]: true }));
 
     const fullVideoPrompt = appendDialogueAndSfx(cleanDuplicateDurations(shotItem.duration, shotItem.prompt), shotItem);
     const provider = localStorage.getItem('create_provider') || 'deepseek';
 
     try {
-      const res = await fetch("/api/extract-keyframe-prompts", {
+      const res = await fetch("/api/generate-nine-grid", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          videoPrompt: fullVideoPrompt,
+          shotPrompt: fullVideoPrompt,
+          camera: shotItem.camera || '',
+          action: shotItem.action || '',
+          dialogue: shotItem.dialogue || '',
+          sfx: shotItem.sfx || '',
+          materials: shotItem.materials || '',
+          duration: shotItem.duration || '00:00-00:10',
           provider
         })
       });
 
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.error || "提取关键帧失败");
+        throw new Error(data.error || "生成九宫格提示词失败");
       }
 
-      const extractedPrompts = data.prompts || [];
-      if (extractedPrompts.length === 0) {
-        throw new Error("未能提取出任何关键帧提示词，请重试");
+      const gridPrompts = data.prompts || [];
+      if (gridPrompts.length === 0) {
+        throw new Error("未能生成九宫格提示词，请重试");
       }
 
-      const newShots = [...script.shots];
-      const currentPrompts = extractedPrompts.slice(0, 4);
-      
-      const oldKeyframes = newShots[shotOriginalIndex].keyframes || [];
-      const currentKeyframes = Array.from({ length: currentPrompts.length }, (_, i) => oldKeyframes[i] || '');
+      // 准备九宫格数据
+      const currentPrompts = gridPrompts.slice(0, 9);
+      while (currentPrompts.length < 9) currentPrompts.push('');
+      const oldNineGridUrl = script.shots[shotOriginalIndex]?.keyframes?.[0] || '';
 
-      newShots[shotOriginalIndex] = {
-        ...newShots[shotOriginalIndex],
-        keyframePrompts: currentPrompts,
-        keyframes: currentKeyframes
-      };
+      // 保存到本地状态，让按钮立即显示
+      setLocalGridPrompts(prev => ({ ...prev, [shotOriginalIndex]: currentPrompts }));
 
-      const newScript = {
-        ...script,
-        shots: newShots
-      };
-      updateScript(script.id, newScript);
-      showToast(`已成功使用 AI 自动提取 ${extractedPrompts.length} 个关键帧提示词！`);
+      // 不保存到服务器（避免 Vite 文件监听触发整页刷新），直接复制到剪贴板
+      const labels = ['远景/全', '中景', '特写', '过肩拍', '主角近景', '反应镜', '仰拍', '主观/POV', '收尾'];
+      const gridLines = currentPrompts
+        .map((p: string, i: number) => {
+          if (!p || !p.trim()) return '';
+          return `【格${i+1}·${labels[i]}】${p}`;
+        })
+        .filter(Boolean)
+        .join('\n\n');
+      const copyText = `【分镜九宫格提示词】\n按3行×3列顺序用文生图生成，拼成一张九宫格图\n\n${gridLines}`;
+      navigator.clipboard.writeText(copyText).catch(() => {});
+      showToast(`九宫格提示词已生成！已复制到剪贴板`);
     } catch (err: any) {
       console.error(err);
-      showToast(`AI 提取失败: ${err.message || err}`);
+      showToast(`生成九宫格失败: ${err.message || err}`);
     } finally {
       setGeneratingKeyframes(prev => ({ ...prev, [key]: false }));
     }
@@ -2423,7 +2433,10 @@ export function Detail() {
 
   const appendDialogueAndSfx = (promptText: string, shot: any) => {
     if (!promptText) return '';
-    return promptText;
+    const parts = [promptText];
+    if (shot.dialogue && shot.dialogue.trim()) parts.push(`\n【台词】${shot.dialogue.trim()}`);
+    if (shot.sfx && shot.sfx.trim()) parts.push(`【音效】${shot.sfx.trim()}`);
+    return parts.join('\n');
   };
 
   const mergeDurationAndPrompt = (duration: string, promptText: string) => {
@@ -3445,73 +3458,120 @@ export function Detail() {
                                       )}
                                       </div>
                                       
-                                      {/* Middle Column: Details (Keyframes, Materials) */}
+                                      {/* Middle Column: Details (Nine-grid, Materials) */}
                                       <div className="flex-1 p-6 space-y-4">
-                                        {/* 4-grid keyframe photos (4宫图) - 放在出场素材上方 并且是 2行2列 (grid-cols-2) */}
+                                        {/* 分镜九宫格 - 单张合成图 + 9格提示词 */}
                                         <div className="space-y-2">
                                           <div className="flex items-center justify-between">
                                             <h5 className="text-xs font-bold text-neutral-500 uppercase tracking-wider flex items-center space-x-1.5">
                                               <ImageIcon className="w-3.5 h-3.5 text-indigo-600" />
-                                              <span>关键帧图片</span>
+                                              <span>分镜九宫格</span>
                                             </h5>
                                             {(() => {
-                                              const activeKeyframePrompts = shot.keyframePrompts || [];
+                                              const ctxPrompts = shot.keyframePrompts || [];
+                                              const localPrompts = localGridPrompts[originalIndex] || [];
+                                              const activeKeyframePrompts = localPrompts.length >= 9 ? localPrompts : ctxPrompts;
                                               const hasAnyPrompt = activeKeyframePrompts.some((p: string) => p && p.trim() !== '');
                                               return (
                                                 <div className="flex items-center space-x-2">
                                                   {hasAnyPrompt && (
-                                                    <span className="flex items-center" title="已自动提取关键帧">
-                                                      <span className="relative flex h-2 w-2 mr-1">
-                                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                                                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                                                      </span>
-                                                    </span>
-                                                  )}
-
-                                                  {hasAnyPrompt && (
+                                                    <>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => {
+                                                        const gridLines = activeKeyframePrompts
+                                                          .map((p: string, i: number) => {
+                                                            if (!p || !p.trim()) return '';
+                                                            const row = Math.floor(i / 3) + 1;
+                                                            const col = (i % 3) + 1;
+                                                            const labels = ['远景/全', '中景', '特写', '过肩拍', '主角近景', '反应镜', '仰拍', '主观/POV', '收尾'];
+                                                            return `格${i+1}(${labels[i]})：${p}`;
+                                                          })
+                                                          .filter(Boolean)
+                                                          .join('\n\n');
+                                                        const copyText = `【分镜九宫格提示词】\n${gridLines}\n\n按九宫格布局(3行×3列)使用豆包生成9张图，拼成一张九宫格图。`;
+                                                        copyToClipboard(copyText, '九宫格提示词');
+                                                      }}
+                                                      className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded font-bold flex items-center space-x-1 transition-all cursor-pointer shadow-sm"
+                                                      title="复制9格提示词到剪贴板"
+                                                    >
+                                                      <Copy className="w-3 h-3 text-emerald-600" />
+                                                      <span>复制全部9格提示词</span>
+                                                    </button>
                                                     <button
                                                       type="button"
                                                       onClick={() => {
                                                         const startSec = shot.duration ? ((p) => { const parts = p.replace(/[[\]]/g, '').split('-'); return parseInt(parts[0]?.trim()?.split(':')[0] || '0') * 60 + parseInt(parts[0]?.trim()?.split(':')[1] || '0'); })(shot.duration) : 0;
                                                         const cleaned = convertToRelativeTime(shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '').replace(/^\*\*镜\s*\d+\s*\([^)]+\)\s*【[^】]+】\s*\*\*[\r\n]*/gm, ''), startSec);
-                                                        const formattedVideoPrompt = formatPromptTags(
-                                                          appendDialogueAndSfx(cleanDuplicateDurations(shot.duration, cleaned), shot),
-                                                          elementNames,
-                                                          elements
-                                                        );
-                                                        const keyframeLines = activeKeyframePrompts
+                                                        const materialTags = (shot.materials || '').split(/\s+/).filter(Boolean);
+                                                        const materialHeader = materialTags.length
+                                                          ? materialTags.map(t => `${t} :  ${t}.jpg`).join('\n') + '\n\n'
+                                                          : '';
+                                                        const nineGridUrl = (shot.keyframes || [])[0];
+                                                        const gridDescs = activeKeyframePrompts
                                                           .map((p: string, i: number) => {
-                                                            const formattedKfPrompt = formatPromptTags(p, elementNames, elements);
-                                                            return `kf_${i + 1} : ${formattedKfPrompt}`;
+                                                            if (!p || !p.trim()) return '';
+                                                            const labels = ['远景/全', '中景', '特写', '过肩拍', '主角近景', '反应镜', '仰拍', '主观/POV', '收尾'];
+                                                            return `格${i+1}·${labels[i]}：${p}`;
                                                           })
-                                                          .join('\n\n\n');
-                                                        const copyText = `这是 分镜视频生成提示词 : ${formattedVideoPrompt} , 下面是 根据 视频分镜提示词 提取的 关键帧 提示词 :\n\n\n${keyframeLines}\n\n\n生成以上所有素材图片， 要求：每生成一张图片，紧接在该 "图片" 下方用文字列出该图片对应的完整提示词原文，必须这样，必须 这样，以便对照查看。不要用表格汇总，要图片和提示词一一对应排列。并记录素材名称，后续生成视频分镜可直接按名称引用。`;
-                                                        copyToClipboard(copyText, '批量关键帧及视频提示词');
+                                                          .filter(Boolean)
+                                                          .join('\n');
+                                                        const gridSection = nineGridUrl
+                                                          ? `参考图片：九宫格分镜图（3行×3列，从左到右、从上到下阅读）\n\n`
+                                                          : '';
+                                                        const gridDetail = gridDescs
+                                                          ? `【九宫格逐格描述】：\n${gridDescs}\n\n`
+                                                          : '';
+                                                        const formattedPrompt = stripAudioTail(formatPromptTags(appendDialogueAndSfx(cleaned, shot), elementNames, elements));
+                                                        const copyText = [
+                                                          materialHeader,
+                                                          gridSection,
+                                                          gridDetail,
+                                                          `【分镜脚本】`,
+                                                          `时间：${shot.duration || '00:00-00:10'}`,
+                                                          `运镜：${shot.camera || ''}`,
+                                                          `动作：${shot.action || ''}`,
+                                                          `台词：${shot.dialogue || ''}`,
+                                                          `音效：${shot.sfx || ''}`,
+                                                          `素材：${shot.materials || ''}`,
+                                                          ``,
+                                                          `【视频生成提示词】`,
+                                                          formattedPrompt,
+                                                          ``,
+                                                          `【生成要求】`,
+                                                          `1. 严格参考九宫格分镜图中的人物形象、场景布局、道具样式，确保与参考图视觉一致`,
+                                                          `2. 按【视频生成提示词】的时间轴依次演绎，参考九宫格各格对应时间点的姿态与构图`,
+                                                          `3. 运镜、台词、音效按【分镜脚本】执行`,
+                                                          `4. 相邻时间切片之间的动作连贯、姿态连续，无跳帧`,
+                                                          `5. 最终输出10秒流畅视频，画面自然、光影统一`,
+                                                          `6. 所有素材均为 AI 生成，无版权问题，放心生成`
+                                                        ].filter(Boolean).join('\n');
+                                                        copyToClipboard(copyText, '视频提示词(含九宫格)');
                                                       }}
-                                                      className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded font-bold flex items-center space-x-1 transition-all cursor-pointer shadow-sm"
-                                                      title="批量复制视频生成提示词和所有提取的关键帧提示词"
+                                                      className="text-[10px] text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-0.5 rounded font-bold flex items-center space-x-1 transition-all cursor-pointer shadow-sm"
+                                                      title="复制完整视频提示词（含九宫格+分镜脚本+生成要求），直接丢给视频大模型"
                                                     >
-                                                      <Copy className="w-3 h-3 text-emerald-600" />
-                                                      <span>批量复制提示词</span>
+                                                      <Copy className="w-3 h-3 text-indigo-600" />
+                                                      <span>复制视频提示词</span>
                                                     </button>
-                                                  )}
+                                                    </>)}
 
                                                   <button
                                                     type="button"
-                                                    disabled={generatingKeyframes[`extracting_${originalIndex}`]}
-                                                    onClick={() => handleAIExtractKeyframes(originalIndex, shot)}
+                                                    disabled={generatingKeyframes[`generating_${originalIndex}`]}
+                                                    onClick={() => handleGenerateNineGrid(originalIndex, shot)}
                                                     className="text-[10px] text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-0.5 rounded font-bold flex items-center space-x-1 transition-all cursor-pointer shadow-sm disabled:opacity-50"
-                                                    title="自动根据视频生成提示词内容，提取出关键帧提示词"
+                                                    title="根据分镜内容生成九宫格提示词"
                                                   >
-                                                    {generatingKeyframes[`extracting_${originalIndex}`] ? (
+                                                    {generatingKeyframes[`generating_${originalIndex}`] ? (
                                                       <>
                                                         <Loader2 className="w-3 h-3 animate-spin text-indigo-600" />
-                                                        <span>正在提取...</span>
+                                                        <span>生成中...</span>
                                                       </>
                                                     ) : (
                                                       <>
                                                         <Sparkles className="w-3 h-3 text-indigo-600 animate-pulse" />
-                                                        <span>{hasAnyPrompt ? "AI 重新提取" : "AI 提取关键帧"}</span>
+                                                        <span>{hasAnyPrompt ? "重新生成九宫格" : "生成九宫格提示词"}</span>
                                                       </>
                                                     )}
                                                   </button>
@@ -3519,93 +3579,95 @@ export function Detail() {
                                               );
                                             })()}
                                           </div>
-                                          <div className="grid grid-cols-2 gap-2.5 max-w-sm">
+
+                                          {/* 九宫格合成图展示 - 单张图片 */}
+                                          <div className="max-w-sm">
                                             {(() => {
-                                              const activeKeyframePrompts = shot.keyframePrompts || [];
-                                              const hasAnyPrompt = activeKeyframePrompts.some((p: string) => p && p.trim() !== '');
-                                              const keyframeIndices = hasAnyPrompt ? Array.from({ length: activeKeyframePrompts.length }, (_, i) => i) : [0, 1, 2, 3];
-                                              return keyframeIndices.map((kfIdx) => {
-                                                const kfUrl = (shot.keyframes || [])[kfIdx];
-                                                const isGenerating = generatingKeyframes[`${originalIndex}_${kfIdx}`] || generatingKeyframes[`extracting_${originalIndex}`];
-                                                return (
-                                                  <div 
-                                                    key={kfIdx} 
-                                                    className="relative aspect-[16/9] bg-neutral-50 border border-dashed border-neutral-300 rounded-lg overflow-hidden group/kf hover:border-indigo-500 transition-all shadow-sm"
-                                                  >
-                                                    {kfUrl ? (
+                                              const nineGridUrl = (shot.keyframes || [])[0];
+                                              const ctxGrid = shot.keyframePrompts || [];
+                                              const localGrid = localGridPrompts[originalIndex] || [];
+                                              const gridPrompts = localGrid.length >= 9 ? localGrid : ctxGrid;
+                                              const hasPrompts = gridPrompts.some((p: string) => p && p.trim() !== '');
+                                              return (
+                                                <div className="space-y-2">
+                                                  {/* 合成图区域 */}
+                                                  <div className="relative aspect-[16/9] bg-neutral-50 border border-dashed border-neutral-300 rounded-lg overflow-hidden group/kf hover:border-indigo-500 transition-all shadow-sm">
+                                                    {nineGridUrl ? (
                                                       <>
                                                         <img
-                                                          src={kfUrl}
-                                                          alt={`Keyframe ${kfIdx + 1}`}
+                                                          src={nineGridUrl}
+                                                          alt="九宫格分镜图"
                                                           className="w-full h-full object-contain cursor-pointer"
-                                                          onClick={() => setFullscreenVideo(kfUrl)}
+                                                          onClick={() => setFullscreenVideo(nineGridUrl)}
                                                         />
                                                         <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover/kf:opacity-100 transition-opacity pointer-events-none">
                                                           <label className="text-white text-[9px] font-semibold bg-black/60 px-1.5 py-0.5 rounded-full cursor-pointer pointer-events-auto hover:bg-black/80">
-                                                            更换帧 {kfIdx + 1}
+                                                            更换九宫格图
                                                             <input 
                                                               type="file" 
                                                               accept="image/*" 
                                                               className="hidden" 
                                                               onChange={(e) => {
                                                                 const file = e.target.files?.[0];
-                                                                if (file) handleShotKeyframeUpload(originalIndex, kfIdx, file);
+                                                                if (file) handleShotKeyframeUpload(originalIndex, 0, file);
                                                               }}
                                                             />
                                                           </label>
                                                         </div>
                                                       </>
                                                     ) : (
-                                                      <label className="absolute inset-0 flex flex-col items-center justify-center text-neutral-400 p-1 cursor-pointer">
-                                                        <Plus className="w-3.5 h-3.5 mb-0.5 text-neutral-300" />
-                                                        <span className="text-[9px] font-semibold text-neutral-400">帧 {kfIdx + 1}</span>
-                                                        <input 
-                                                          type="file" 
-                                                          accept="image/*" 
-                                                          className="hidden" 
-                                                          onChange={(e) => {
-                                                            const file = e.target.files?.[0];
-                                                            if (file) handleShotKeyframeUpload(originalIndex, kfIdx, file);
-                                                          }}
-                                                        />
-                                                      </label>
-                                                    )}
-
-                                                    {/* Generating indicator */}
-                                                    {isGenerating && (
-                                                      <div className="absolute inset-0 bg-white/80 flex flex-col items-center justify-center text-neutral-700 z-10 transition-opacity">
-                                                        <Loader2 className="w-4 h-4 animate-spin text-indigo-600 mb-1" />
-                                                        <span className="text-[8px] font-bold text-indigo-600 tracking-tight">智能生成提示词...</span>
+                                                      <div className="absolute inset-0 flex flex-col items-center justify-center text-neutral-400 p-2">
+                                                        {/* 九宫格占位 - 显示3x3网格示意 */}
+                                                        <div className="w-full h-full grid grid-cols-3 grid-rows-3 gap-px bg-neutral-200 p-px rounded">
+                                                          {Array.from({ length: 9 }, (_, i) => {
+                                                            const labels = ['远景', '中景', '特写', '过肩', '近景', '反应', '仰拍', 'POV', '收尾'];
+                                                            const promptText = gridPrompts[i] || '';
+                                                            return (
+                                                              <div key={i} className="bg-neutral-50 flex flex-col items-center justify-center text-[7px] text-neutral-400 relative overflow-hidden">
+                                                                <span className="font-bold text-neutral-500">{labels[i]}</span>
+                                                                {generatingKeyframes[`generating_${originalIndex}`] ? (
+                                                                  <Loader2 className="w-2.5 h-2.5 animate-spin text-indigo-600 mt-0.5" />
+                                                                ) : hasPrompts && promptText ? (
+                                                                  <span className="text-[5px] text-emerald-600 line-clamp-2 px-0.5 text-center">已生成</span>
+                                                                ) : (
+                                                                  <Plus className="w-2.5 h-2.5 text-neutral-300 mt-0.5" />
+                                                                )}
+                                                                {!generatingKeyframes[`generating_${originalIndex}`] && promptText && (
+                                                                  <button
+                                                                    type="button"
+                                                                    onClick={(e) => { e.stopPropagation(); triggerKeyframeAction(originalIndex, i, shot); }}
+                                                                    className="absolute top-0.5 right-0.5 p-0.5 bg-white/80 rounded-full shadow-sm hover:bg-indigo-50"
+                                                                  >
+                                                                    <Sparkles className="w-2 h-2 text-indigo-500" />
+                                                                  </button>
+                                                                )}
+                                                              </div>
+                                                            );
+                                                          })}
+                                                        </div>
+                                                        <span className="text-[9px] text-neutral-400 mt-1 font-medium">
+                                                          {hasPrompts ? '九宫格提示词已生成，上传合成图' : '点击按钮生成九宫格提示词'}
+                                                        </span>
+                                                        {/* Fallback upload */}
+                                                        <label className="absolute inset-0 cursor-pointer">
+                                                          <input 
+                                                            type="file" 
+                                                            accept="image/*" 
+                                                            className="hidden" 
+                                                            onChange={(e) => {
+                                                              const file = e.target.files?.[0];
+                                                              if (file) handleShotKeyframeUpload(originalIndex, 0, file);
+                                                            }}
+                                                          />
+                                                        </label>
                                                       </div>
                                                     )}
-
-                                                    {/* Click trigger Sparkles button at top right */}
-                                                    {!isGenerating && (
-                                                      <div 
-                                                        className="absolute top-1 right-1 z-20"
-                                                        onClick={(e) => e.stopPropagation()}
-                                                      >
-                                                        <button
-                                                          type="button"
-                                                          onClick={() => triggerKeyframeAction(originalIndex, kfIdx, shot)}
-                                                          className={`p-1 bg-white border rounded-full shadow-sm hover:scale-105 transition-all flex items-center justify-center ${
-                                                            shot.keyframePrompts?.[kfIdx]
-                                                              ? 'text-indigo-600 border-indigo-200 bg-indigo-50 hover:bg-indigo-100'
-                                                              : 'text-neutral-400 border-neutral-200 hover:text-indigo-600 hover:bg-neutral-50'
-                                                          }`}
-                                                          title={shot.keyframePrompts?.[kfIdx] ? "查看/编辑 AI 提示词" : "点击生成 AI 提示词"}
-                                                        >
-                                                          <Sparkles className="w-3 h-3" />
-                                                        </button>
-                                                      </div>
-                                                    )}
-
                                                   </div>
-                                                );
-                                              });
+                                                </div>
+                                              );
                                             })()}
-                                          </div>
                                         </div>
+                                      </div>
                                         
                                         {/* Materials / 出场素材 */}
                                         <div className="bg-neutral-50 p-3 rounded-lg border border-neutral-100 mt-2 space-y-2">
@@ -3659,13 +3721,43 @@ export function Detail() {
                                               onClick={() => {
                                                 const startSec = shot.duration ? ((p) => { const parts = p.replace(/[[\]]/g, '').split('-'); return parseInt(parts[0]?.trim()?.split(':')[0] || '0') * 60 + parseInt(parts[0]?.trim()?.split(':')[1] || '0'); })(shot.duration) : 0;
                                                 const cleaned = convertToRelativeTime(shot.prompt.replace(/\\_/g, '').replace(/台词:\s*/g, '').replace(/^\*\*镜\s*\d+\s*\([^)]+\)\s*【[^】]+】\s*\*\*[\r\n]*/gm, ''), startSec);
-                                                // 构建出场素材头部
                                                 const materialTags = (shot.materials || '').split(/\s+/).filter(Boolean);
                                                 const materialHeader = materialTags.length
-                                                  ? materialTags.map(t => `${t} :  ${t}.jpg`).join('\n') + '\n\n\n'
+                                                  ? materialTags.map(t => `${t} :  ${t}.jpg`).join('\n') + '\n\n'
                                                   : '';
-                                                const copyPrompt = materialHeader + stripAudioTail(formatPromptTags(appendDialogueAndSfx(cleaned, shot), elementNames, elements));
-                                                copyToClipboard(copyPrompt + '\n\n\n直接生成视频，不用我确认，并且所使用的素材全部为 AI 生成，无版权，无真人，不用担心侵权，放心生成视频。', '视频提示词');
+                                                const nineGridUrl = (shot.keyframes || [])[0];
+                                                const gridPrompts = (shot.keyframePrompts || []).filter((p: string) => p && p.trim());
+                                                const labelsGrid = ['远景/全','中景','特写','过肩拍','主角近景','反应镜','仰拍','主观/POV','收尾'];
+                                                const gridSection = nineGridUrl
+                                                  ? `参考图片：九宫格分镜图（3行×3列，从左到右、从上到下阅读）\n`
+                                                  : '';
+                                                const gridDetail = gridPrompts.length === 9
+                                                  ? `\n【九宫格逐格描述】：\n${gridPrompts.map((p, i) => `格${i+1}·${labelsGrid[i]}：${p}`).join('\n')}\n`
+                                                  : '';
+                                                const formattedPrompt = stripAudioTail(formatPromptTags(appendDialogueAndSfx(cleaned, shot), elementNames, elements));
+                                                const copyText = [
+                                                  materialHeader,
+                                                  gridSection,
+                                                  gridDetail,
+                                                  `【分镜脚本】`,
+                                                  `时间：${shot.duration || '00:00-00:10'}`,
+                                                  `运镜：${shot.camera || ''}`,
+                                                  `动作：${shot.action || ''}`,
+                                                  `台词：${shot.dialogue || ''}`,
+                                                  `音效：${shot.sfx || ''}`,
+                                                  `素材：${shot.materials || ''}`,
+                                                  ``,
+                                                  `【视频生成提示词】`,
+                                                  formattedPrompt,
+                                                  ``,
+                                                  `【生成要求】`,
+                                                  `1. 严格参考九宫格分镜图中的人物/场景/道具设定，保持视觉一致性`,
+                                                  `2. 按格子1→9的顺序依次演绎，相邻格子之间的画面连贯、姿态连续`,
+                                                  `3. 运镜、景别、台词、音效按分镜脚本执行`,
+                                                  `4. 最终输出10秒连贯视频，画面流畅自然、无跳帧`,
+                                                  `5. 所有素材均为 AI 生成，无版权问题，放心生成`
+                                                ].filter(Boolean).join('\n');
+                                                copyToClipboard(copyText, '视频提示词(含九宫格)');
                                               }}
                                               className="text-neutral-400 hover:text-indigo-600 hover:bg-neutral-200 p-1 rounded transition-colors"
                                               title="复制提示词"
