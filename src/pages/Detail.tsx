@@ -2433,10 +2433,69 @@ export function Detail() {
 
   const appendDialogueAndSfx = (promptText: string, shot: any) => {
     if (!promptText) return '';
-    const parts = [promptText];
-    if (shot.dialogue && shot.dialogue.trim()) parts.push(`\n【台词】${shot.dialogue.trim()}`);
-    if (shot.sfx && shot.sfx.trim()) parts.push(`【音效】${shot.sfx.trim()}`);
-    return parts.join('\n');
+    return promptText;
+  };
+
+  // 从九宫格提示词中提取每格音效，注入到视频提示词的对应时间切片行
+  const injectGridSfxIntoPrompt = (promptText: string, gridPrompts: string[]): string => {
+    if (!promptText || !gridPrompts.length) return promptText;
+    // 解析九宫格每格的音效：格式为 【时间】描述 | 视觉 | 光效 | 台词 | 音效 | 转场
+    const gridSfx: { time: string; sfx: string }[] = [];
+    for (const gp of gridPrompts) {
+      const parts = gp.split('|').map(s => s.trim());
+      if (parts.length >= 5) {
+        // 提取时间 【0-1.5秒】 取括号内
+        const timeMatch = parts[0].match(/【(.+?)】/);
+        gridSfx.push({
+          time: timeMatch ? timeMatch[1] : '',
+          sfx: parts[4] || '无'
+        });
+      }
+    }
+    if (!gridSfx.length) return promptText;
+
+    // 解析视频提示词每行的时间
+    const lines = promptText.split('\n').filter(Boolean);
+    const parsedLines: { line: string; start: number; end: number }[] = [];
+    for (const line of lines) {
+      const match = line.match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)秒\s*｜/);
+      if (match) {
+        parsedLines.push({ line, start: parseFloat(match[1]), end: parseFloat(match[2]) });
+      }
+    }
+    if (!parsedLines.length) return promptText;
+
+    // 解析九宫格每格的时间
+    const parsedGrid: { sfx: string; start: number; end: number }[] = [];
+    for (const g of gridSfx) {
+      const tMatch = g.time.match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)/);
+      if (tMatch) {
+        parsedGrid.push({ sfx: g.sfx, start: parseFloat(tMatch[1]), end: parseFloat(tMatch[2]) });
+      }
+    }
+    if (!parsedGrid.length) return promptText;
+
+    // 映射：对每行视频提示词，找时间重叠最大+中心点最近的九宫格，取其音效
+    const result: string[] = [];
+    for (const pl of parsedLines) {
+      const plMid = (pl.start + pl.end) / 2;
+      let bestOverlap = 0;
+      let bestDist = Infinity;
+      let bestSfx = '';
+      for (const pg of parsedGrid) {
+        const overlap = Math.min(pl.end, pg.end) - Math.max(pl.start, pg.start);
+        if (overlap <= 0) continue;
+        const pgMid = (pg.start + pg.end) / 2;
+        const dist = Math.abs(plMid - pgMid);
+        if (overlap > bestOverlap || (overlap === bestOverlap && dist < bestDist)) {
+          bestOverlap = overlap;
+          bestDist = dist;
+          bestSfx = pg.sfx;
+        }
+      }
+      result.push(bestSfx ? `${pl.line} ｜ 【音效】${bestSfx}` : pl.line);
+    }
+    return result.join('\n');
   };
 
   const mergeDurationAndPrompt = (duration: string, promptText: string) => {
@@ -3522,17 +3581,17 @@ export function Detail() {
                                                         const gridDetail = gridDescs
                                                           ? `【九宫格逐格描述】：\n${gridDescs}\n\n`
                                                           : '';
-                                                        const formattedPrompt = stripAudioTail(formatPromptTags(appendDialogueAndSfx(cleaned, shot), elementNames, elements));
+                                                        const formattedPrompt = injectGridSfxIntoPrompt(
+                                                          stripAudioTail(formatPromptTags(appendDialogueAndSfx(cleaned, shot), elementNames, elements)),
+                                                          activeKeyframePrompts
+                                                        );
                                                         const copyText = [
                                                           materialHeader,
-                                                          gridSection,
-                                                          gridDetail,
                                                           `【分镜脚本】`,
                                                           `时间：${shot.duration || '00:00-00:10'}`,
                                                           `运镜：${shot.camera || ''}`,
                                                           `动作：${shot.action || ''}`,
                                                           `台词：${shot.dialogue || ''}`,
-                                                          `音效：${shot.sfx || ''}`,
                                                           `素材：${shot.materials || ''}`,
                                                           ``,
                                                           `【视频生成提示词】`,
@@ -3541,7 +3600,7 @@ export function Detail() {
                                                           `【生成要求】`,
                                                           `1. 严格参考九宫格分镜图中的人物形象、场景布局、道具样式，确保与参考图视觉一致`,
                                                           `2. 按【视频生成提示词】的时间轴依次演绎，参考九宫格各格对应时间点的姿态与构图`,
-                                                          `3. 运镜、台词、音效按【分镜脚本】执行`,
+                                                          `3. 运镜、台词按【分镜脚本】执行，音效按【视频生成提示词】每行标注`,
                                                           `4. 相邻时间切片之间的动作连贯、姿态连续，无跳帧`,
                                                           `5. 最终输出10秒流畅视频，画面自然、光影统一`,
                                                           `6. 所有素材均为 AI 生成，无版权问题，放心生成`
@@ -3734,28 +3793,29 @@ export function Detail() {
                                                 const gridDetail = gridPrompts.length === 9
                                                   ? `\n【九宫格逐格描述】：\n${gridPrompts.map((p, i) => `格${i+1}·${labelsGrid[i]}：${p}`).join('\n')}\n`
                                                   : '';
-                                                const formattedPrompt = stripAudioTail(formatPromptTags(appendDialogueAndSfx(cleaned, shot), elementNames, elements));
+                                                const formattedPrompt = injectGridSfxIntoPrompt(
+                                                  stripAudioTail(formatPromptTags(appendDialogueAndSfx(cleaned, shot), elementNames, elements)),
+                                                  gridPrompts
+                                                );
                                                 const copyText = [
                                                   materialHeader,
-                                                  gridSection,
-                                                  gridDetail,
                                                   `【分镜脚本】`,
                                                   `时间：${shot.duration || '00:00-00:10'}`,
                                                   `运镜：${shot.camera || ''}`,
                                                   `动作：${shot.action || ''}`,
                                                   `台词：${shot.dialogue || ''}`,
-                                                  `音效：${shot.sfx || ''}`,
                                                   `素材：${shot.materials || ''}`,
                                                   ``,
                                                   `【视频生成提示词】`,
                                                   formattedPrompt,
                                                   ``,
                                                   `【生成要求】`,
-                                                  `1. 严格参考九宫格分镜图中的人物/场景/道具设定，保持视觉一致性`,
-                                                  `2. 按格子1→9的顺序依次演绎，相邻格子之间的画面连贯、姿态连续`,
-                                                  `3. 运镜、景别、台词、音效按分镜脚本执行`,
-                                                  `4. 最终输出10秒连贯视频，画面流畅自然、无跳帧`,
-                                                  `5. 所有素材均为 AI 生成，无版权问题，放心生成`
+                                                  `1. 严格参考九宫格分镜图中的人物形象、场景布局、道具样式，确保与参考图视觉一致`,
+                                                  `2. 按【视频生成提示词】的时间轴依次演绎，参考九宫格各格对应时间点的姿态与构图`,
+                                                  `3. 运镜、台词、音效按【分镜脚本】执行`,
+                                                  `4. 相邻时间切片之间的动作连贯、姿态连续，无跳帧`,
+                                                  `5. 最终输出10秒流畅视频，画面自然、光影统一`,
+                                                  `6. 所有素材均为 AI 生成，无版权问题，放心生成`
                                                 ].filter(Boolean).join('\n');
                                                 copyToClipboard(copyText, '视频提示词(含九宫格)');
                                               }}
